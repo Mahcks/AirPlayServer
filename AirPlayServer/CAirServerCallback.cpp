@@ -70,6 +70,13 @@ void CAirServerCallback::outputAudio(SFgAudioFrame* data, const char* remoteName
 	}
 }
 
+void CAirServerCallback::outputH264AccessUnit(SFgH264AccessUnit* data, const char* remoteName, const char* remoteDeviceId)
+{
+	(void)data;
+	(void)remoteName;
+	(void)remoteDeviceId;
+}
+
 void CAirServerCallback::outputVideo(SFgVideoFrame* data, const char* remoteName, const char* remoteDeviceId)
 {
 	if (m_pPlayer)

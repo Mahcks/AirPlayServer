@@ -14,6 +14,7 @@ public:
 	virtual void connected(const char* remoteName, const char* remoteDeviceId) = 0;
 	virtual void disconnected(const char* remoteName, const char* remoteDeviceId) = 0;
 	virtual void outputAudio(SFgAudioFrame* data, const char* remoteName, const char* remoteDeviceId) = 0;
+	virtual void outputH264AccessUnit(SFgH264AccessUnit* data, const char* remoteName, const char* remoteDeviceId) = 0;
 	virtual void outputVideo(SFgVideoFrame* data, const char* remoteName, const char* remoteDeviceId) = 0;
 
 	virtual void videoPlay(char* url, double volume, double startPos) = 0;

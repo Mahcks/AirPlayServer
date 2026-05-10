@@ -335,6 +335,22 @@ void FgAirplayServer::video_process(void* cls, h264_decode_struct* h264data, con
 		return;
 	}
 
+	if (pServer->m_pCallback != NULL)
+	{
+		SFgH264AccessUnit frame = {};
+		frame.pts = h264data->pts;
+		frame.dts = h264data->pts;
+		frame.duration = 0;
+		frame.isKey = h264data->frame_type == 0 ? 1 : 0;
+		frame.dataLen = h264data->data_len;
+		frame.data = new uint8_t[frame.dataLen];
+		memcpy(frame.data, h264data->data, frame.dataLen);
+
+		pServer->m_pCallback->outputH264AccessUnit(&frame, remoteName, remoteDeviceId);
+
+		delete[] frame.data;
+	}
+
 	SFgH264Data* pData = new SFgH264Data();
 	memset(pData, 0, sizeof(SFgH264Data));
 
