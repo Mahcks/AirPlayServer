@@ -106,6 +106,26 @@ void CAirServerCallback::setVolume(float volume, const char* remoteName, const c
 	}
 }
 
+bool CAirServerCallback::approvePairingRequest(
+	const char* remoteName,
+	const char* remoteDeviceId,
+	const char* remoteModel,
+	const char* remoteOsName,
+	const char* remoteOsVersion,
+	const char* remoteOsBuildVersion,
+	const char* remoteSourceVersion)
+{
+	UNREFERENCED_PARAMETER(remoteDeviceId);
+	UNREFERENCED_PARAMETER(remoteModel);
+	UNREFERENCED_PARAMETER(remoteOsName);
+	UNREFERENCED_PARAMETER(remoteOsVersion);
+	UNREFERENCED_PARAMETER(remoteOsBuildVersion);
+	UNREFERENCED_PARAMETER(remoteSourceVersion);
+
+	printf("Pairing request received from %s\n", remoteName != NULL ? remoteName : "Unknown device");
+	return true;
+}
+
 double dbDuration = 10000;
 double dbPosition = 0;
 void CAirServerCallback::videoGetPlayInfo(double* duration, double* position, double* rate)
