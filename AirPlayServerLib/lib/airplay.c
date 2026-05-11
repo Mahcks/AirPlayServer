@@ -381,6 +381,12 @@ conn_datafeed(void *ptr, unsigned char *data, int len)
 airplay_t *
 airplay_init(int max_clients, airplay_callbacks_t *callbacks, const char *pemkey, int *error)
 {
+	return airplay_init_with_seed(max_clients, callbacks, pemkey, NULL, error);
+}
+
+airplay_t *
+airplay_init_with_seed(int max_clients, airplay_callbacks_t *callbacks, const char *pemkey, const unsigned char pairing_seed[32], int *error)
+{
 	airplay_t *airplay;
 	pairing_t* pairing;
 	httpd_t *httpd;
@@ -412,7 +418,7 @@ airplay_init(int max_clients, airplay_callbacks_t *callbacks, const char *pemkey
 	}
 
 	airplay->logger = logger_init();
-	pairing = pairing_init_generate();
+	pairing = pairing_seed ? pairing_init_seed(pairing_seed) : pairing_init_generate();
 	if (!pairing) {
 		free(airplay);
 		return NULL;

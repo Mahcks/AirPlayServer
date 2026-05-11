@@ -1,15 +1,89 @@
 ﻿#include "pch.h"
 #include "FgAirplayServer.h"
 #include "Airplay2Head.h"
+#include <array>
+#include <bcrypt.h>
+#include <cstdlib>
+#include <fstream>
 #include <thread>
 #include "CAutoLock.h"
 
 #ifdef WIN32
 #include   "iphlpapi.h"  
 #pragma   comment(lib,   "iphlpapi.lib   ")  
+#pragma comment(lib, "bcrypt.lib")
 #endif
 
 BOOL GetMacAddress(char strMac[6]);
+
+namespace {
+
+constexpr size_t kPairingSeedSize = 32;
+
+std::string pairingSeedPath()
+{
+	char appData[MAX_PATH] = {};
+	const DWORD length = GetEnvironmentVariableA("APPDATA", appData, MAX_PATH);
+	if (length == 0 || length >= MAX_PATH) {
+		return std::string();
+	}
+
+	return std::string(appData, length) + "\\MirrorSim\\receiver-pairing-seed.bin";
+}
+
+bool ensureParentDirectory(const std::string& filePath)
+{
+	const size_t separator = filePath.find_last_of("\\/");
+	if (separator == std::string::npos) {
+		return false;
+	}
+
+	const std::string directory = filePath.substr(0, separator);
+	if (CreateDirectoryA(directory.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
+		return true;
+	}
+
+	return false;
+}
+
+bool fillRandomSeed(unsigned char* buffer, size_t length)
+{
+	return BCryptGenRandom(NULL, buffer, static_cast<ULONG>(length), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+}
+
+bool loadOrCreatePairingSeed(std::array<unsigned char, kPairingSeedSize>& seed)
+{
+	const std::string filePath = pairingSeedPath();
+	if (filePath.empty()) {
+		return false;
+	}
+
+	std::ifstream input(filePath, std::ios::binary);
+	if (input.good()) {
+		input.read(reinterpret_cast<char*>(seed.data()), static_cast<std::streamsize>(seed.size()));
+		if (input.gcount() == static_cast<std::streamsize>(seed.size())) {
+			return true;
+		}
+	}
+
+	if (!fillRandomSeed(seed.data(), seed.size())) {
+		return false;
+	}
+
+	if (!ensureParentDirectory(filePath)) {
+		return true;
+	}
+
+	std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
+	if (!output.good()) {
+		return true;
+	}
+
+	output.write(reinterpret_cast<const char*>(seed.data()), static_cast<std::streamsize>(seed.size()));
+	return true;
+}
+
+} // namespace
 
 FgAirplayServer::FgAirplayServer()
 	: m_pCallback(NULL)
@@ -38,6 +112,7 @@ FgAirplayServer::FgAirplayServer()
 	m_stRaopCB.audio_set_coverart = audio_set_coverart;
 	m_stRaopCB.audio_process = audio_process;
 	m_stRaopCB.audio_flush = audio_flush;
+	m_stRaopCB.pairing_request = pairing_request;
 	// m_stRaopCB.audio_destroy = audio_destroy;
 	m_stRaopCB.video_process = video_process;
 
@@ -63,13 +138,17 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 	unsigned short airplay_port = airplayPort;
 	char hwaddr[] = { 0x48, 0x5d, 0x60, 0x7c, 0xee, 0x22 };
 	char* pemstr = NULL;
+	std::array<unsigned char, kPairingSeedSize> pairingSeed = {};
+	const bool hasPersistentPairingSeed = loadOrCreatePairingSeed(pairingSeed);
 
 	int ret = 0;
 	do {
 
 		GetMacAddress(hwaddr);
 
-		m_pAirplay = airplay_init(10, &m_stAirplayCB, pemstr, &ret);
+		m_pAirplay = hasPersistentPairingSeed
+			? airplay_init_with_seed(10, &m_stAirplayCB, pemstr, pairingSeed.data(), &ret)
+			: airplay_init(10, &m_stAirplayCB, pemstr, &ret);
 		if (m_pAirplay == NULL) {
 			ret = -1;
 			break;
@@ -81,7 +160,9 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 		airplay_set_log_level(m_pAirplay, RAOP_LOG_DEBUG);
 		airplay_set_log_callback(m_pAirplay, &log_callback, this);
 
-		m_pRaop = raop_init(10, &m_stRaopCB);
+		m_pRaop = hasPersistentPairingSeed
+			? raop_init_with_seed(10, &m_stRaopCB, pairingSeed.data())
+			: raop_init(10, &m_stRaopCB);
 		if (m_pRaop == NULL) {
 			ret = -1;
 			break;
@@ -242,6 +323,32 @@ void FgAirplayServer::disconnected(void* cls, const char* remoteName, const char
 	if (pChannel) {
 		pChannel->release();
 	}
+}
+
+int FgAirplayServer::pairing_request(
+	void* cls,
+	const char* remoteName,
+	const char* remoteDeviceId,
+	const char* remoteModel,
+	const char* remoteOsName,
+	const char* remoteOsVersion,
+	const char* remoteOsBuildVersion,
+	const char* remoteSourceVersion)
+{
+	FgAirplayServer* pServer = (FgAirplayServer*)cls;
+	if (!pServer || pServer->m_pCallback == NULL)
+	{
+		return 1;
+	}
+
+	return pServer->m_pCallback->approvePairingRequest(
+		remoteName,
+		remoteDeviceId,
+		remoteModel,
+		remoteOsName,
+		remoteOsVersion,
+		remoteOsBuildVersion,
+		remoteSourceVersion) ? 1 : 0;
 }
 
 // void* FgAirplayServer::audio_init(void* opaque, int bits, int channels, int samplerate)

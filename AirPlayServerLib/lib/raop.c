@@ -236,6 +236,12 @@ conn_destroy(void *ptr)
 raop_t *
 raop_init(int max_clients, raop_callbacks_t *callbacks)
 {
+	return raop_init_with_seed(max_clients, callbacks, NULL);
+}
+
+raop_t *
+raop_init_with_seed(int max_clients, raop_callbacks_t *callbacks, const unsigned char pairing_seed[32])
+{
 	raop_t *raop;
 	pairing_t *pairing;
 	httpd_t *httpd;
@@ -263,7 +269,7 @@ raop_init(int max_clients, raop_callbacks_t *callbacks)
 
 	/* Initialize the logger */
 	raop->logger = logger_init();
-	pairing = pairing_init_generate();
+	pairing = pairing_seed ? pairing_init_seed(pairing_seed) : pairing_init_generate();
 	if (!pairing) {
 		free(raop);
 		return NULL;
