@@ -56,7 +56,8 @@ struct raop_callbacks_s {
 		const char* remoteOsName,
 		const char* remoteOsVersion,
 		const char* remoteOsBuildVersion,
-		const char* remoteSourceVersion);
+		const char* remoteSourceVersion,
+		const char* pairingFingerprint);
 };
 typedef struct raop_callbacks_s raop_callbacks_t;
 

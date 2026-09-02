@@ -113,7 +113,8 @@ bool CAirServerCallback::approvePairingRequest(
 	const char* remoteOsName,
 	const char* remoteOsVersion,
 	const char* remoteOsBuildVersion,
-	const char* remoteSourceVersion)
+	const char* remoteSourceVersion,
+	const char* pairingFingerprint)
 {
 	UNREFERENCED_PARAMETER(remoteDeviceId);
 	UNREFERENCED_PARAMETER(remoteModel);
@@ -121,6 +122,7 @@ bool CAirServerCallback::approvePairingRequest(
 	UNREFERENCED_PARAMETER(remoteOsVersion);
 	UNREFERENCED_PARAMETER(remoteOsBuildVersion);
 	UNREFERENCED_PARAMETER(remoteSourceVersion);
+	UNREFERENCED_PARAMETER(pairingFingerprint);
 
 	printf("Pairing request received from %s\n", remoteName != NULL ? remoteName : "Unknown device");
 	return true;

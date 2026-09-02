@@ -31,7 +31,8 @@ public:
 		const char* remoteOsName,
 		const char* remoteOsVersion,
 		const char* remoteOsBuildVersion,
-		const char* remoteSourceVersion);
+		const char* remoteSourceVersion,
+		const char* pairingFingerprint);
 
 	virtual void log(int level, const char* msg);
 

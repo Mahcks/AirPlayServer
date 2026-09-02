@@ -29,12 +29,16 @@ public:
 		const char* remoteOsName,
 		const char* remoteOsVersion,
 		const char* remoteOsBuildVersion,
-		const char* remoteSourceVersion) = 0;
+		const char* remoteSourceVersion,
+		const char* pairingFingerprint) = 0;
 
 	virtual void log(int level, const char* msg) = 0;
 };
 
 AIRPLAYSERVER_API void* fgServerStart(const char serverName[AIRPLAY_NAME_LEN], 
+	unsigned int raopPort, unsigned int airplayPort,
+	IAirServerCallback* callback);
+AIRPLAYSERVER_API void* fgServerStartHeadless(const char serverName[AIRPLAY_NAME_LEN],
 	unsigned int raopPort, unsigned int airplayPort,
 	IAirServerCallback* callback);
 AIRPLAYSERVER_API void fgServerStop(void* handle);

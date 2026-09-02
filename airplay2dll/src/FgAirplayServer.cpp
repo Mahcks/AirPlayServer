@@ -91,6 +91,7 @@ FgAirplayServer::FgAirplayServer()
 	, m_pAirplay(NULL)
 	, m_pRaop(NULL)
 	, m_fScaleRatio(1.0f)
+	, m_compressedOnly(false)
 {
 	memset(&m_stAirplayCB, 0, sizeof(airplay_callbacks_t));
 	memset(&m_stRaopCB, 0, sizeof(raop_callbacks_t));
@@ -130,9 +131,10 @@ FgAirplayServer::~FgAirplayServer()
 
 int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN], 
 	unsigned int raopPort, unsigned int airplayPort,
-	IAirServerCallback* callback)
+	IAirServerCallback* callback, bool compressedOnly)
 {
 	m_pCallback = callback;
+	m_compressedOnly = compressedOnly;
 
 	unsigned short raop_port = raopPort;
 	unsigned short airplay_port = airplayPort;
@@ -281,8 +283,11 @@ void FgAirplayServer::connected(void* cls, const char* remoteName, const char* r
 	{
 		return;
 	}
-	CAutoLock oLock(pServer->m_mutexMap, "connected");
-	pServer->getChannel(remoteDeviceId);
+	if (!pServer->m_compressedOnly)
+	{
+		CAutoLock oLock(pServer->m_mutexMap, "connected");
+		pServer->getChannel(remoteDeviceId);
+	}
 
 	if (pServer->m_pCallback != NULL)
 	{
@@ -297,11 +302,14 @@ void FgAirplayServer::disconnected(void* cls, const char* remoteName, const char
 	{
 		return;
 	}
-	
 	// Safely call the callback
 	if (pServer->m_pCallback != NULL)
 	{
 		pServer->m_pCallback->disconnected(remoteName, remoteDeviceId);
+	}
+	if (pServer->m_compressedOnly)
+	{
+		return;
 	}
 
 	// Wait a bit to ensure any in-flight video/audio processing completes
@@ -333,7 +341,8 @@ int FgAirplayServer::pairing_request(
 	const char* remoteOsName,
 	const char* remoteOsVersion,
 	const char* remoteOsBuildVersion,
-	const char* remoteSourceVersion)
+	const char* remoteSourceVersion,
+	const char* pairingFingerprint)
 {
 	FgAirplayServer* pServer = (FgAirplayServer*)cls;
 	if (!pServer || pServer->m_pCallback == NULL)
@@ -348,7 +357,8 @@ int FgAirplayServer::pairing_request(
 		remoteOsName,
 		remoteOsVersion,
 		remoteOsBuildVersion,
-		remoteSourceVersion) ? 1 : 0;
+		remoteSourceVersion,
+		pairingFingerprint) ? 1 : 0;
 }
 
 // void* FgAirplayServer::audio_init(void* opaque, int bits, int channels, int samplerate)
@@ -387,6 +397,10 @@ void FgAirplayServer::audio_process(void* cls, pcm_data_struct* data, const char
 {
 	FgAirplayServer* pServer = (FgAirplayServer*)cls;
 	if (!pServer)
+	{
+		return;
+	}
+	if (pServer->m_compressedOnly)
 	{
 		return;
 	}
@@ -450,12 +464,14 @@ void FgAirplayServer::video_process(void* cls, h264_decode_struct* h264data, con
 		frame.duration = 0;
 		frame.isKey = h264data->frame_type == 0 ? 1 : 0;
 		frame.dataLen = h264data->data_len;
-		frame.data = new uint8_t[frame.dataLen];
-		memcpy(frame.data, h264data->data, frame.dataLen);
+		frame.data = h264data->data;
 
 		pServer->m_pCallback->outputH264AccessUnit(&frame, remoteName, remoteDeviceId);
+	}
 
-		delete[] frame.data;
+	if (pServer->m_compressedOnly)
+	{
+		return;
 	}
 
 	SFgH264Data* pData = new SFgH264Data();

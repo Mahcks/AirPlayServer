@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -19,6 +20,7 @@ namespace {
 constexpr unsigned int kDefaultFrameDurationUs = 16667;
 constexpr unsigned int kMinFrameDurationUs = 8000;
 constexpr unsigned int kMaxFrameDurationUs = 50000;
+constexpr unsigned int kMaxAccessUnitBytes = 8 * 1024 * 1024;
 
 std::string jsonEscape(const std::string& value)
 {
@@ -240,6 +242,11 @@ SidecarCommandType parseCommandType(const std::string& line)
 	return SidecarCommandType::Unknown;
 }
 
+struct PairingCorrelation {
+	std::string sessionId;
+	std::string challengeId;
+};
+
 class MirrorSimCallback : public IAirServerCallback
 {
 public:
@@ -258,6 +265,7 @@ public:
 		, m_hasLastPts(false)
 		, m_lastPairingPhase("idle")
 		, m_pairingApprovalState(PairingApprovalState::Idle)
+		, m_pairingGeneration(0)
 	{
 	}
 
@@ -269,33 +277,38 @@ public:
 
 	void setPendingSession(const std::string& sessionId, const std::string& streamId)
 	{
-		std::lock_guard<std::mutex> lock(m_stateMutex);
-		m_sessionId = sessionId;
-		m_streamId = streamId;
-		m_sampleIndex = 0;
-		m_lastPts = 0;
-		m_lastDuration = kDefaultFrameDurationUs;
-		m_hasLastPts = false;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			m_sessionId = sessionId;
+			m_streamId = streamId;
+			m_sampleIndex = 0;
+			m_lastPts = 0;
+			m_lastDuration = kDefaultFrameDurationUs;
+			m_hasLastPts = false;
+		}
+		clearPairingCorrelation();
 	}
 
 	void clearSession()
 	{
-		std::lock_guard<std::mutex> lock(m_stateMutex);
-		m_sessionId.clear();
-		m_streamId.clear();
-		m_deviceName.clear();
-		m_deviceId.clear();
-		m_deviceModel.clear();
-		m_deviceOsName.clear();
-		m_deviceOsVersion.clear();
-		m_deviceOsBuildVersion.clear();
-		m_deviceSourceVersion.clear();
-		m_lastPairingPhase = "idle";
-		m_sampleIndex = 0;
-		m_lastPts = 0;
-		m_lastDuration = kDefaultFrameDurationUs;
-		m_hasLastPts = false;
-		clearPendingApproval();
+		cancelAnyPendingTrust("The receiver session ended.");
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			m_sessionId.clear();
+			m_streamId.clear();
+			clearSenderLocked();
+		}
+		clearPairingCorrelation();
+	}
+
+	void clearSender()
+	{
+		cancelAnyPendingTrust("The iPhone disconnected before pairing completed.");
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			clearSenderLocked();
+		}
+		clearPairingCorrelation();
 	}
 
 	void updateTrustPolicy(
@@ -309,7 +322,7 @@ public:
 
 	void emitReceiverReady()
 	{
-		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.4.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"device-identity\",\"pairing-status\",\"pairing-trust-control\"]}");
+		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.5.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
 	}
 
 	void emitReceiverError(const std::string& code, const std::string& message, bool recoverable)
@@ -319,6 +332,58 @@ public:
 			  << "\",\"message\":\"" << jsonEscape(message)
 			  << "\",\"recoverable\":" << (recoverable ? "true" : "false") << "}";
 		emitJson(event.str());
+	}
+
+	PairingCorrelation ensurePairingCorrelation(
+		const std::string& requestedSessionId,
+		bool startNewIfTerminal = false)
+	{
+		std::lock_guard<std::mutex> lock(m_pairingMutex);
+		return ensurePairingCorrelationLocked(requestedSessionId, startNewIfTerminal);
+	}
+
+	PairingCorrelation ensurePairingCorrelationLocked(
+		const std::string& requestedSessionId,
+		bool startNewIfTerminal)
+	{
+		const std::string sessionId = requestedSessionId.empty() ? "session-unknown" : requestedSessionId;
+		if (m_currentPairingSessionId != sessionId
+			|| m_currentPairingChallengeId.empty()
+			|| (startNewIfTerminal && m_currentPairingTerminal))
+		{
+			m_currentPairingSessionId = sessionId;
+			m_currentPairingChallengeId = sessionId + "-" + std::to_string(++m_pairingGeneration);
+			m_currentPairingTerminal = false;
+		}
+		return {m_currentPairingSessionId, m_currentPairingChallengeId};
+	}
+
+	PairingCorrelation ensureCurrentPairingCorrelation()
+	{
+		std::string sessionId;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			sessionId = m_sessionId;
+		}
+		return ensurePairingCorrelation(sessionId);
+	}
+
+	void finishPairingCorrelation(const PairingCorrelation& correlation)
+	{
+		std::lock_guard<std::mutex> lock(m_pairingMutex);
+		if (m_currentPairingSessionId == correlation.sessionId
+			&& m_currentPairingChallengeId == correlation.challengeId)
+		{
+			m_currentPairingTerminal = true;
+		}
+	}
+
+	void clearPairingCorrelation()
+	{
+		std::lock_guard<std::mutex> lock(m_pairingMutex);
+		m_currentPairingSessionId.clear();
+		m_currentPairingChallengeId.clear();
+		m_currentPairingTerminal = false;
 	}
 
 	void emitDiscontinuity(const std::string& reason, bool requiresRefresh)
@@ -341,7 +406,8 @@ public:
 		const std::string& entryMode,
 		const std::string& prompt,
 		const std::string& failureMessage,
-		bool canTrust)
+		bool canTrust,
+		const PairingCorrelation& correlation)
 	{
 		std::string deviceName;
 		std::string deviceId;
@@ -352,12 +418,18 @@ public:
 		std::string deviceSourceVersion;
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
-			if (phase == m_lastPairingPhase && prompt.empty() && failureMessage.empty())
+			if (phase == m_lastPairingPhase
+				&& correlation.sessionId == m_lastPairingSessionId
+				&& correlation.challengeId == m_lastPairingChallengeId
+				&& prompt.empty()
+				&& failureMessage.empty())
 			{
 				return;
 			}
 
 			m_lastPairingPhase = phase;
+			m_lastPairingSessionId = correlation.sessionId;
+			m_lastPairingChallengeId = correlation.challengeId;
 			deviceName = m_deviceName;
 			deviceId = m_deviceId;
 			deviceModel = m_deviceModel;
@@ -410,6 +482,9 @@ public:
 			event << ",\"device_source_version\":\"" << jsonEscape(deviceSourceVersion) << "\"";
 		}
 
+		event << ",\"session_id\":\"" << jsonEscape(correlation.sessionId) << "\"";
+		event << ",\"challenge_id\":\"" << jsonEscape(correlation.challengeId) << "\"";
+
 		if (!prompt.empty())
 		{
 			event << ",\"prompt\":\"" << jsonEscape(prompt) << "\"";
@@ -431,18 +506,22 @@ public:
 		const char* remoteOsName,
 		const char* remoteOsVersion,
 		const char* remoteOsBuildVersion,
-		const char* remoteSourceVersion) override
+		const char* remoteSourceVersion,
+		const char* pairingFingerprint) override
 	{
+		(void)remoteDeviceId;
 		const std::string deviceName = remoteName ? remoteName : "AirPlay sender";
-		const std::string deviceId = remoteDeviceId ? remoteDeviceId : "";
+		const std::string deviceId = pairingFingerprint ? pairingFingerprint : "";
 		const std::string deviceModel = remoteModel ? remoteModel : "";
 		const std::string deviceOsName = remoteOsName ? remoteOsName : "";
 		const std::string deviceOsVersion = remoteOsVersion ? remoteOsVersion : "";
 		const std::string deviceOsBuildVersion = remoteOsBuildVersion ? remoteOsBuildVersion : "";
 		const std::string deviceSourceVersion = remoteSourceVersion ? remoteSourceVersion : "";
 
+		std::string approvalSessionId;
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
+			approvalSessionId = m_sessionId;
 			m_deviceName = deviceName;
 			m_deviceId = deviceId;
 			m_deviceModel = deviceModel;
@@ -451,31 +530,51 @@ public:
 			m_deviceOsBuildVersion = deviceOsBuildVersion;
 			m_deviceSourceVersion = deviceSourceVersion;
 		}
-
+		unsigned long long approvalGeneration = 0;
+		bool anotherApprovalIsPending = false;
+		PairingCorrelation correlation;
 		{
 			std::unique_lock<std::mutex> lock(m_pairingMutex);
-			if (!deviceId.empty())
+			if (m_pairingApprovalState == PairingApprovalState::Pending)
 			{
-				if (std::find(m_blockedDeviceIds.begin(), m_blockedDeviceIds.end(), deviceId) != m_blockedDeviceIds.end())
-				{
-					lock.unlock();
-					emitPairingStateChanged("failed", "confirm-only", std::string(), "This iPhone is blocked on this PC.", false);
-					emitReceiverError("pairing_blocked", "This iPhone is blocked on this PC.", true);
-					return false;
-				}
-
-				if (std::find(m_trustedDeviceIds.begin(), m_trustedDeviceIds.end(), deviceId) != m_trustedDeviceIds.end())
-				{
-					lock.unlock();
-					emitPairingStateChanged("verifying", "confirm-only", "Trusted device recognized on this PC.", std::string(), false);
-					return true;
-				}
+				anotherApprovalIsPending = true;
 			}
+			else
+			{
+				correlation = ensurePairingCorrelationLocked(approvalSessionId, true);
+				if (!deviceId.empty())
+				{
+					if (std::find(m_blockedDeviceIds.begin(), m_blockedDeviceIds.end(), deviceId) != m_blockedDeviceIds.end())
+					{
+						lock.unlock();
+						emitPairingStateChanged("failed", "confirm-only", std::string(), "This iPhone is blocked on this PC.", false, correlation);
+						finishPairingCorrelation(correlation);
+						emitReceiverError("pairing_blocked", "This iPhone is blocked on this PC.", true);
+						return false;
+					}
 
-			m_pendingDeviceName = deviceName;
-			m_pendingDeviceId = deviceId;
-			m_pairingApprovalState = PairingApprovalState::Pending;
-			m_pairingFailureReason.clear();
+					if (std::find(m_trustedDeviceIds.begin(), m_trustedDeviceIds.end(), deviceId) != m_trustedDeviceIds.end())
+					{
+						lock.unlock();
+						emitPairingStateChanged("verifying", "confirm-only", "Trusted device recognized on this PC.", std::string(), false, correlation);
+						return true;
+					}
+				}
+
+				approvalGeneration = m_pairingGeneration;
+				m_pendingDeviceName = deviceName;
+				m_pendingDeviceId = deviceId;
+				m_pendingSessionId = correlation.sessionId;
+				m_pendingChallengeId = correlation.challengeId;
+				m_pairingApprovalState = PairingApprovalState::Pending;
+				m_pairingFailureReason.clear();
+			}
+		}
+
+		if (anotherApprovalIsPending)
+		{
+			emitReceiverError("pairing_busy", "Another iPhone pairing request is already awaiting approval.", true);
+			return false;
 		}
 
 		emitPairingStateChanged(
@@ -483,47 +582,82 @@ public:
 			"confirm-only",
 			"Approve this iPhone before MirrorSim starts streaming.",
 			std::string(),
-			true);
+			true,
+			correlation);
 
 		std::unique_lock<std::mutex> lock(m_pairingMutex);
 		const bool resolved = m_pairingCv.wait_for(
 			lock,
 			std::chrono::seconds(90),
-			[this]() {
-				return m_pairingApprovalState == PairingApprovalState::Approved
+			[this, approvalGeneration]() {
+				return m_pairingGeneration != approvalGeneration
+					|| m_pairingApprovalState == PairingApprovalState::Approved
 					|| m_pairingApprovalState == PairingApprovalState::Rejected;
 			});
 
-		const PairingApprovalState decision = resolved ? m_pairingApprovalState : PairingApprovalState::Rejected;
+		const bool sameApproval = m_pairingGeneration == approvalGeneration;
+		const PairingApprovalState decision = resolved && sameApproval
+			? m_pairingApprovalState
+			: PairingApprovalState::Rejected;
 		const std::string failureReason = resolved
 			? (m_pairingFailureReason.empty() ? "Pairing approval was cancelled." : m_pairingFailureReason)
 			: "Pairing approval timed out.";
-		clearPendingApprovalLocked();
+		if (sameApproval)
+		{
+			clearPendingApprovalLocked();
+		}
 		lock.unlock();
 
 		if (decision == PairingApprovalState::Approved)
 		{
-			emitPairingStateChanged("verifying", "confirm-only", "MirrorSim approved this iPhone. Finishing the AirPlay handshake.", std::string(), false);
+			emitPairingStateChanged("verifying", "confirm-only", "MirrorSim approved this iPhone. Finishing the AirPlay handshake.", std::string(), false, correlation);
 			return true;
 		}
 
-		emitPairingStateChanged("failed", "confirm-only", std::string(), failureReason, false);
+		emitPairingStateChanged("failed", "confirm-only", std::string(), failureReason, false, correlation);
+		finishPairingCorrelation(correlation);
 		emitReceiverError("pairing_rejected", failureReason, true);
 		return false;
 	}
 
-	void confirmPendingTrust()
+	bool confirmPendingTrust(const std::string& sessionId, const std::string& challengeId)
 	{
 		std::lock_guard<std::mutex> lock(m_pairingMutex);
-		if (m_pairingApprovalState == PairingApprovalState::Pending)
+		if (m_pairingApprovalState == PairingApprovalState::Pending
+			&& !sessionId.empty()
+			&& !challengeId.empty()
+			&& sessionId == m_pendingSessionId
+			&& challengeId == m_pendingChallengeId)
 		{
 			m_pairingApprovalState = PairingApprovalState::Approved;
 			m_pairingFailureReason.clear();
 			m_pairingCv.notify_all();
+			return true;
 		}
+		return false;
 	}
 
-	void cancelPendingTrust(const std::string& reason)
+	bool cancelPendingTrust(
+		const std::string& sessionId,
+		const std::string& challengeId,
+		const std::string& reason)
+	{
+		std::lock_guard<std::mutex> lock(m_pairingMutex);
+		if (m_pairingApprovalState == PairingApprovalState::Pending
+			&& !sessionId.empty()
+			&& !challengeId.empty()
+			&& sessionId == m_pendingSessionId
+			&& challengeId == m_pendingChallengeId)
+		{
+			m_pairingApprovalState = PairingApprovalState::Rejected;
+			m_pairingFailureReason = reason;
+			m_pairingCv.notify_all();
+			return true;
+		}
+		return false;
+	}
+
+	void cancelAnyPendingTrust(const std::string& reason)
 	{
 		std::lock_guard<std::mutex> lock(m_pairingMutex);
 		if (m_pairingApprovalState == PairingApprovalState::Pending)
@@ -538,23 +672,27 @@ public:
 	{
 		if (containsInsensitive(message, "/pair-setup"))
 		{
+			const PairingCorrelation correlation = ensureCurrentPairingCorrelation();
 			emitPairingStateChanged(
 				"verifying",
 				"none",
 				"MirrorSim is negotiating AirPlay trust with the sender.",
 				std::string(),
-				false);
+				false,
+				correlation);
 			return;
 		}
 
 		if (containsInsensitive(message, "/pair-verify"))
 		{
+			const PairingCorrelation correlation = ensureCurrentPairingCorrelation();
 			emitPairingStateChanged(
 				"verifying",
 				"none",
 				"MirrorSim is verifying the AirPlay pairing handshake.",
 				std::string(),
-				false);
+				false,
+				correlation);
 			return;
 		}
 
@@ -563,7 +701,9 @@ public:
 			|| containsInsensitive(message, "error initializing pair-verify handshake")
 			|| containsInsensitive(message, "incorrect pair-verify signature"))
 		{
-			emitPairingStateChanged("failed", "none", std::string(), message, false);
+			const PairingCorrelation correlation = ensureCurrentPairingCorrelation();
+			emitPairingStateChanged("failed", "none", std::string(), message, false, correlation);
+			finishPairingCorrelation(correlation);
 		}
 	}
 
@@ -572,7 +712,7 @@ public:
 		std::string sessionId;
 		std::string streamId;
 		std::string deviceName = remoteName ? remoteName : "AirPlay sender";
-		std::string deviceId = remoteDeviceId ? remoteDeviceId : "";
+		std::string deviceId;
 		std::string deviceModel;
 		std::string deviceOsName;
 		std::string deviceOsVersion;
@@ -583,7 +723,7 @@ public:
 			sessionId = m_sessionId.empty() ? "session-unknown" : m_sessionId;
 			streamId = m_streamId.empty() ? "stream-unknown" : m_streamId;
 			m_deviceName = deviceName;
-			m_deviceId = deviceId;
+			deviceId = m_deviceId;
 			deviceModel = m_deviceModel;
 			deviceOsName = m_deviceOsName;
 			deviceOsVersion = m_deviceOsVersion;
@@ -628,7 +768,9 @@ public:
 
 		event << "}";
 		emitJson(event.str());
-		emitPairingStateChanged("paired", "none", std::string(), std::string(), false);
+		const PairingCorrelation correlation = ensurePairingCorrelation(sessionId);
+		emitPairingStateChanged("paired", "none", std::string(), std::string(), false, correlation);
+		finishPairingCorrelation(correlation);
 	}
 
 	virtual void disconnected(const char* remoteName, const char* remoteDeviceId) override
@@ -636,7 +778,7 @@ public:
 		(void)remoteName;
 		(void)remoteDeviceId;
 		emitDiscontinuity("sender_disconnected", true);
-		clearSession();
+		clearSender();
 	}
 
 	virtual void outputAudio(SFgAudioFrame* data, const char* remoteName, const char* remoteDeviceId) override
@@ -650,6 +792,11 @@ public:
 	{
 		(void)remoteName;
 		(void)remoteDeviceId;
+		if (!data || !data->data || data->dataLen == 0 || data->dataLen > kMaxAccessUnitBytes)
+		{
+			emitReceiverError("invalid_video_access_unit", "The receiver dropped an invalid or oversized H.264 access unit.", true);
+			return;
+		}
 		std::string streamId;
 		unsigned int sampleIndex = 0;
 		unsigned int duration = data->duration;
@@ -661,13 +808,21 @@ public:
 			if (m_hasLastPts && data->pts > m_lastPts)
 			{
 				const unsigned long long delta = data->pts - m_lastPts;
-				if (delta >= kMinFrameDurationUs && delta <= kMaxFrameDurationUs)
+				if (delta <= (std::numeric_limits<unsigned int>::max)())
 				{
-					m_lastDuration = static_cast<unsigned int>(delta);
+					const unsigned int observedDuration = static_cast<unsigned int>(delta);
+					if (observedDuration >= kMinFrameDurationUs && observedDuration <= kMaxFrameDurationUs)
+					{
+						m_lastDuration = observedDuration;
+					}
+					if (duration == 0)
+					{
+						duration = observedDuration;
+					}
 				}
 			}
 
-			if (duration < kMinFrameDurationUs || duration > kMaxFrameDurationUs)
+			if (duration == 0)
 			{
 				duration = m_lastDuration;
 			}
@@ -731,10 +886,22 @@ public:
 	}
 
 private:
-	void clearPendingApproval()
+	void clearSenderLocked()
 	{
-		std::lock_guard<std::mutex> lock(m_pairingMutex);
-		clearPendingApprovalLocked();
+		m_deviceName.clear();
+		m_deviceId.clear();
+		m_deviceModel.clear();
+		m_deviceOsName.clear();
+		m_deviceOsVersion.clear();
+		m_deviceOsBuildVersion.clear();
+		m_deviceSourceVersion.clear();
+		m_lastPairingPhase = "idle";
+		m_lastPairingSessionId.clear();
+		m_lastPairingChallengeId.clear();
+		m_sampleIndex = 0;
+		m_lastPts = 0;
+		m_lastDuration = kDefaultFrameDurationUs;
+		m_hasLastPts = false;
 	}
 
 	void clearPendingApprovalLocked()
@@ -743,6 +910,8 @@ private:
 		m_pairingFailureReason.clear();
 		m_pendingDeviceName.clear();
 		m_pendingDeviceId.clear();
+		m_pendingSessionId.clear();
+		m_pendingChallengeId.clear();
 	}
 
 	void emitJson(const std::string& event)
@@ -764,6 +933,8 @@ private:
 	std::string m_deviceOsBuildVersion;
 	std::string m_deviceSourceVersion;
 	std::string m_lastPairingPhase;
+	std::string m_lastPairingSessionId;
+	std::string m_lastPairingChallengeId;
 	unsigned int m_sampleIndex;
 	unsigned long long m_lastPts;
 	unsigned int m_lastDuration;
@@ -771,9 +942,15 @@ private:
 	std::mutex m_pairingMutex;
 	std::condition_variable m_pairingCv;
 	PairingApprovalState m_pairingApprovalState;
+	unsigned long long m_pairingGeneration;
 	std::string m_pairingFailureReason;
 	std::string m_pendingDeviceName;
 	std::string m_pendingDeviceId;
+	std::string m_pendingSessionId;
+	std::string m_pendingChallengeId;
+	std::string m_currentPairingSessionId;
+	std::string m_currentPairingChallengeId;
+	bool m_currentPairingTerminal = false;
 	std::vector<std::string> m_trustedDeviceIds;
 	std::vector<std::string> m_blockedDeviceIds;
 };
@@ -809,7 +986,7 @@ int main()
 				{
 					strncpy_s(serverName, requestedReceiverName.c_str(), AIRPLAY_NAME_LEN - 1);
 				}
-				serverHandle = fgServerStart(serverName, 5001, 7001, &callback);
+				serverHandle = fgServerStartHeadless(serverName, 5001, 7001, &callback);
 				callback.setServerHandle(serverHandle);
 				if (!serverHandle)
 				{
@@ -821,6 +998,7 @@ int main()
 		case SidecarCommandType::StopSession:
 			if (serverHandle)
 			{
+				callback.cancelAnyPendingTrust("The receiver was stopped.");
 				fgServerStop(serverHandle);
 				serverHandle = nullptr;
 				callback.emitDiscontinuity("session_stopped", false);
@@ -828,18 +1006,39 @@ int main()
 			}
 			break;
 		case SidecarCommandType::ConfirmPairingTrust:
-			callback.confirmPendingTrust();
+			if (!callback.confirmPendingTrust(
+				extractJsonString(line, "session_id"),
+				extractJsonString(line, "challenge_id")))
+			{
+				callback.emitReceiverError("stale_pairing_approval", "The pairing approval no longer matches the active iPhone request.", true);
+			}
 			break;
 		case SidecarCommandType::CancelPairing:
-			callback.cancelPendingTrust("Pairing approval was cancelled.");
-			callback.emitPairingStateChanged("idle", "none", std::string(), std::string(), false);
+		{
+			const PairingCorrelation correlation = {
+				extractJsonString(line, "session_id"),
+				extractJsonString(line, "challenge_id")};
+			if (callback.cancelPendingTrust(
+				correlation.sessionId,
+				correlation.challengeId,
+				"Pairing approval was cancelled."))
+			{
+				callback.emitPairingStateChanged("idle", "none", std::string(), std::string(), false, correlation);
+				callback.finishPairingCorrelation(correlation);
+			}
+			else
+			{
+				callback.emitReceiverError("stale_pairing_cancellation", "The pairing cancellation no longer matches the active iPhone request.", true);
+			}
 			break;
+		}
 		case SidecarCommandType::RequestKeyframe:
-			callback.emitDiscontinuity(extractJsonString(line, "reason"), false);
+			callback.emitReceiverError("keyframe_request_unsupported", "This receiver build cannot request an IDR frame from the sender.", true);
 			break;
 		case SidecarCommandType::Shutdown:
 			if (serverHandle)
 			{
+				callback.cancelAnyPendingTrust("The receiver is shutting down.");
 				fgServerStop(serverHandle);
 				serverHandle = nullptr;
 			}
@@ -853,6 +1052,7 @@ int main()
 
 	if (serverHandle)
 	{
+		callback.cancelAnyPendingTrust("The receiver input stream closed.");
 		fgServerStop(serverHandle);
 	}
 

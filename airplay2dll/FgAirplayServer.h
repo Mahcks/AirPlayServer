@@ -19,7 +19,7 @@ public:
 
 	int start(const char serverName[AIRPLAY_NAME_LEN], 
 		unsigned int raopPort, unsigned int airplayPort,
-		IAirServerCallback* callback);
+		IAirServerCallback* callback, bool compressedOnly = false);
 	void stop();
 	float setScale(float fRatio);
 
@@ -46,7 +46,8 @@ protected:
 		const char* remoteOsName,
 		const char* remoteOsVersion,
 		const char* remoteOsBuildVersion,
-		const char* remoteSourceVersion);
+		const char* remoteSourceVersion,
+		const char* pairingFingerprint);
 	static void log_callback(void* cls, int level, const char* msg);
 
 	static void ap_video_play(void* cls, char* url, double volume, double start_pos);
@@ -67,6 +68,7 @@ protected:
 	void*					m_mutexMap;
 
 	float					m_fScaleRatio;
+	bool					m_compressedOnly;
 	FgAirplayChannelMap		m_mapChannel;
 };
 
