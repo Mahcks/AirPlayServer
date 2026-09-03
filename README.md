@@ -75,6 +75,8 @@ The `MirrorSimAdapter` sidecar exposes protocol `0.6.0`, including bounded H.264
 
 The headless adapter advertises mirroring and audio capabilities only. Media apps therefore remain inside the mirrored screen instead of handing standalone playback to the receiver's intentionally unsupported URL/HLS path.
 
+Mirror timing requests use a 300 ms response window and a three-second cadence. Timing failures and AirPlay control lifecycle transitions are summarized on stderr for MirrorSim diagnostics without flooding the sender or the support log.
+
 1. Clone the repository
    ```bash
    git clone https://github.com/xenos1337/AirPlayServer.git

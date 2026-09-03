@@ -1110,6 +1110,20 @@ public:
 				|| containsInsensitive(message, "mirror packet header")
 				|| (containsInsensitive(message, "mirror")
 					&& containsInsensitive(message, "payload")));
+		const bool mirrorTiming = containsInsensitive(message, "mirror timing");
+		const bool controlLifecycle = containsInsensitive(message, "handling request")
+			|| containsInsensitive(message, "raop_handler_feedback")
+			|| containsInsensitive(message, "raop_handler_record")
+			|| containsInsensitive(message, "setup 1")
+			|| containsInsensitive(message, "setup 2")
+			|| containsInsensitive(message, "setup 3")
+			|| containsInsensitive(message, "teardown")
+			|| containsInsensitive(message, "control connection")
+			|| containsInsensitive(message, "connection closed for socket")
+			|| containsInsensitive(message, "disconnecting on software request")
+			|| containsInsensitive(message, "error in parsing")
+			|| containsInsensitive(message, "error in sending data")
+			|| containsInsensitive(message, "unknown stream");
 		// A pause control packet by itself is harmless. Once the data socket is
 		// gone, always surface bounded reconnect handling; otherwise a pause
 		// immediately followed by FIN can leave the desktop falsely live forever.
@@ -1118,7 +1132,15 @@ public:
 		{
 			emitDiscontinuity("mirror_transport_interrupted", false);
 		}
-		if (containsInsensitive(message, "mirror data")
+		if (mirrorTiming)
+		{
+			std::cerr << "[native-timing] level=" << level << " " << message << std::endl;
+		}
+		else if (controlLifecycle)
+		{
+			std::cerr << "[native-control] level=" << level << " " << message << std::endl;
+		}
+		else if (containsInsensitive(message, "mirror data")
 			|| containsInsensitive(message, "awaiting reconnect")
 			|| containsInsensitive(message, "malformed h264")
 			|| containsInsensitive(message, "mirror payload")

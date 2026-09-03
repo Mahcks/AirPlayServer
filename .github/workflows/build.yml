@@ -46,6 +46,13 @@ jobs:
             throw 'AirPlay capability advertisement must remain mirroring/audio-only.'
           }
 
+          $mirrorTransport = Get-Content -Raw -LiteralPath 'AirPlayServerLib/lib/raop_rtp_mirror.c'
+          if ($mirrorTransport -notmatch '#define\s+MIRROR_TIMING_RESPONSE_TIMEOUT_MS\s+300' -or
+              $mirrorTransport -notmatch '#define\s+MIRROR_TIMING_PROBE_INTERVAL_SECONDS\s+3' -or
+              $mirrorTransport -match 'sleepms\(10\)') {
+            throw 'Mirror timing probes must keep their bounded 300 ms response window and three-second cadence.'
+          }
+
           $adapter = Join-Path $env:RUNTIME_DIR 'MirrorSimAdapter.exe'
           if (-not (Test-Path -LiteralPath $adapter)) {
             throw "Expected runtime output '$adapter' was not produced."

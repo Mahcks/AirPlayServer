@@ -121,6 +121,7 @@ conn_init(void *opaque, unsigned char *local, int locallen, unsigned char *remot
 
 	conn->locallen = locallen;
 	conn->remotelen = remotelen;
+	logger_log(conn->raop->logger, LOGGER_INFO, "RAOP control connection opened");
 
 	return conn;
 }
@@ -202,6 +203,10 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
   //          conn->raop_rtp_mirror = NULL;
   //      }
 	}
+	if (handler == NULL && strcmp(method, "FLUSH")) {
+		logger_log(conn->raop->logger, LOGGER_WARNING,
+		           "Unhandled RAOP control request %s %s", method, url ? url : "");
+	}
 	if (handler != NULL) {
 		handler(conn, request, *response, &response_data, &response_datalen);
 	}
@@ -217,6 +222,7 @@ static void
 conn_destroy(void *ptr)
 {
 	raop_conn_t *conn = ptr;
+	logger_log(conn->raop->logger, LOGGER_INFO, "RAOP control connection closed");
 
 	if (conn->raop_rtp) {
 		/* This is done in case TEARDOWN was not called */

@@ -253,6 +253,7 @@ conn_init(void *opaque, unsigned char *local, int locallen, unsigned char *remot
 	conn->remotelen = remotelen;
 
 	digest_generate_nonce(conn->nonce, sizeof(conn->nonce));
+	logger_log(conn->airplay->logger, LOGGER_INFO, "AirPlay control connection opened");
 	return conn;
 
 }
@@ -303,7 +304,8 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		const char *data;
 		int len;
 		data = http_request_get_data(request, &len);
-		logger_log(conn->airplay->logger, LOGGER_DEBUG, "data len %d:%s\n", len, data);
+		(void)data;
+		logger_log(conn->airplay->logger, LOGGER_DEBUG, "AirPlay control request body length=%d", len);
 	}
 
 	airplay_handler_t handler = NULL;
@@ -352,6 +354,7 @@ static void
 conn_destroy(void *ptr)
 {
 	airplay_conn_t *conn = ptr;
+	logger_log(conn->airplay->logger, LOGGER_INFO, "AirPlay control connection closed");
 	if (conn->airplay_rtp)
 	{
 		raop_rtp_destroy(conn->airplay_rtp);
