@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -447,7 +448,7 @@ public:
 
 	void emitReceiverReady()
 	{
-		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.6.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
+		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.7.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"sender-volume\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
 	}
 
 	void emitReceiverError(const std::string& code, const std::string& message, bool recoverable)
@@ -1078,9 +1079,28 @@ public:
 
 	virtual void setVolume(float volume, const char* remoteName, const char* remoteDeviceId) override
 	{
-		(void)volume;
 		(void)remoteName;
 		(void)remoteDeviceId;
+		if (!m_sessionActive.load() || !std::isfinite(volume))
+		{
+			return;
+		}
+
+		std::string streamId;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			streamId = m_streamId;
+		}
+		if (streamId.empty())
+		{
+			return;
+		}
+
+		std::ostringstream event;
+		event.precision(std::numeric_limits<float>::max_digits10);
+		event << "{\"name\":\"audio_volume_changed\",\"stream_id\":\"" << jsonEscape(streamId)
+			  << "\",\"volume_db\":" << volume << "}";
+		emitJson(event.str());
 	}
 
 	virtual void log(int level, const char* msg) override

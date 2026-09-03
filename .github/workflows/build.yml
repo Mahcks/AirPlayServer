@@ -69,11 +69,14 @@ jobs:
             if ($null -eq $ready) {
               throw 'MirrorSimAdapter did not emit receiver_ready.'
             }
-            if ($ready.protocol_version -ne '0.6.0') {
-              throw "Expected adapter protocol 0.6.0, received '$($ready.protocol_version)'."
+            if ($ready.protocol_version -ne '0.7.0') {
+              throw "Expected adapter protocol 0.7.0, received '$($ready.protocol_version)'."
             }
             if ($ready.capabilities -notcontains 'pcm-audio') {
               throw 'MirrorSimAdapter did not advertise the required pcm-audio capability.'
+            }
+            if ($ready.capabilities -notcontains 'sender-volume') {
+              throw 'MirrorSimAdapter did not advertise the required sender-volume capability.'
             }
           }
           finally {
