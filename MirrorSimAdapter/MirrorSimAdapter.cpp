@@ -31,6 +31,7 @@ constexpr size_t kMaxQueuedAudioFrames = 12;
 constexpr size_t kMaxCombinedAudioFrames = 4;
 constexpr size_t kMaxCombinedAudioBytes = 64 * 1024;
 constexpr unsigned long long kInvalidAudioDiagnosticIntervalMs = 5000;
+constexpr unsigned long long kMirrorStateDiagnosticIntervalMs = 2000;
 
 std::string jsonEscape(const std::string& value)
 {
@@ -341,6 +342,10 @@ public:
 		, m_lastPts(0)
 		, m_lastDuration(kDefaultFrameDurationUs)
 		, m_hasLastPts(false)
+		, m_lastSourceWidth(0)
+		, m_lastSourceHeight(0)
+		, m_lastOutputWidth(0)
+		, m_lastOutputHeight(0)
 		, m_lastPairingPhase("idle")
 		, m_pairingApprovalState(PairingApprovalState::Idle)
 		, m_pairingGeneration(0)
@@ -405,6 +410,8 @@ public:
 			m_lastPts = 0;
 			m_lastDuration = kDefaultFrameDurationUs;
 			m_hasLastPts = false;
+			m_lastCodecPayload.clear();
+			resetGeometryLocked();
 		}
 		clearPairingCorrelation();
 	}
@@ -448,7 +455,7 @@ public:
 
 	void emitReceiverReady()
 	{
-		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.7.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"sender-volume\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
+		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.8.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"sender-volume\",\"video-geometry\",\"video-sender-state\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\",\"external-dnssd\"]}");
 	}
 
 	void emitReceiverError(const std::string& code, const std::string& message, bool recoverable)
@@ -959,10 +966,14 @@ public:
 		}
 		m_mirrorTransportInterrupted.store(false);
 		m_videoReceived.fetch_add(1);
-		m_lastVideoInputTick.store(GetTickCount64());
 		PendingVideoAccessUnit frame;
 		unsigned int duration = data->duration;
 		const AnnexBNalSummary nalSummary = inspectAnnexBNals(data->data, data->dataLen);
+		if (nalSummary.containsVcl)
+		{
+			m_videoFramesReceived.fetch_add(1);
+			m_lastVideoInputTick.store(GetTickCount64());
+		}
 		const bool callbackHeaderKey = data->isKey != 0;
 		if (callbackHeaderKey)
 		{
@@ -975,6 +986,14 @@ public:
 		if (!nalSummary.containsVcl && (nalSummary.containsSps || nalSummary.containsPps))
 		{
 			m_videoCodecOnlyCallbacks.fetch_add(1);
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			if (m_lastCodecPayload.size() == data->dataLen
+				&& std::equal(m_lastCodecPayload.begin(), m_lastCodecPayload.end(), data->data))
+			{
+				m_videoDuplicateCodecCallbacks.fetch_add(1);
+				return;
+			}
+			m_lastCodecPayload.assign(data->data, data->data + data->dataLen);
 		}
 		if (callbackHeaderKey && !nalSummary.containsIdr)
 		{
@@ -1059,6 +1078,73 @@ public:
 		(void)remoteDeviceId;
 	}
 
+	virtual void videoGeometryChanged(float sourceWidth, float sourceHeight,
+		float outputWidth, float outputHeight,
+		const char* remoteName, const char* remoteDeviceId) override
+	{
+		(void)remoteName;
+		(void)remoteDeviceId;
+		if (!m_sessionActive.load() || !std::isfinite(sourceWidth) || !std::isfinite(sourceHeight)
+			|| !std::isfinite(outputWidth) || !std::isfinite(outputHeight)
+			|| sourceWidth <= 0 || sourceHeight <= 0 || outputWidth <= 0 || outputHeight <= 0)
+		{
+			return;
+		}
+
+		const unsigned int sourceWidthPixels = static_cast<unsigned int>(std::lround(sourceWidth));
+		const unsigned int sourceHeightPixels = static_cast<unsigned int>(std::lround(sourceHeight));
+		const unsigned int outputWidthPixels = static_cast<unsigned int>(std::lround(outputWidth));
+		const unsigned int outputHeightPixels = static_cast<unsigned int>(std::lround(outputHeight));
+		std::string streamId;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			if (m_lastSourceWidth == sourceWidthPixels && m_lastSourceHeight == sourceHeightPixels
+				&& m_lastOutputWidth == outputWidthPixels && m_lastOutputHeight == outputHeightPixels)
+			{
+				return;
+			}
+			m_lastSourceWidth = sourceWidthPixels;
+			m_lastSourceHeight = sourceHeightPixels;
+			m_lastOutputWidth = outputWidthPixels;
+			m_lastOutputHeight = outputHeightPixels;
+			streamId = m_streamId.empty() ? "stream-unknown" : m_streamId;
+		}
+
+		std::ostringstream event;
+		event << "{\"name\":\"video_geometry_changed\",\"stream_id\":\"" << jsonEscape(streamId)
+			  << "\",\"source_width\":" << sourceWidthPixels
+			  << ",\"source_height\":" << sourceHeightPixels
+			  << ",\"output_width\":" << outputWidthPixels
+			  << ",\"output_height\":" << outputHeightPixels << "}";
+		emitJson(event.str());
+	}
+
+	virtual void videoSenderPausedChanged(bool paused,
+		const char* remoteName, const char* remoteDeviceId) override
+	{
+		(void)remoteName;
+		(void)remoteDeviceId;
+		if (!m_sessionActive.load())
+		{
+			return;
+		}
+
+		std::string streamId;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			streamId = m_streamId;
+		}
+		if (streamId.empty())
+		{
+			return;
+		}
+
+		std::ostringstream event;
+		event << "{\"name\":\"video_sender_state_changed\",\"stream_id\":\"" << jsonEscape(streamId)
+			  << "\",\"paused\":" << (paused ? "true" : "false") << "}";
+		emitJson(event.str());
+	}
+
 	virtual void videoPlay(char* url, double volume, double startPos) override
 	{
 		(void)url;
@@ -1066,7 +1152,7 @@ public:
 		(void)startPos;
 		emitReceiverError(
 			"unsupported_direct_video",
-			"The iPhone attempted standalone AirPlay video playback. MirrorSim supports Screen Mirroring and is waiting for the mirrored stream to resume.",
+			"This app switched to standalone AirPlay video, which MirrorSim cannot display. Return to normal Screen Mirroring; DRM-protected video may remain black and must be played in the service's Windows app.",
 			true);
 	}
 
@@ -1117,13 +1203,16 @@ public:
 		}
 		const bool mirrorPaused = containsInsensitive(message, "mirror video stream paused by sender");
 		const bool mirrorResumed = containsInsensitive(message, "mirror video stream resumed by sender");
+		bool reportMirrorState = true;
 		if (mirrorPaused)
 		{
 			m_mirrorPauseEvents.fetch_add(1);
+			reportMirrorState = claimMirrorStateDiagnosticWindow();
 		}
 		if (mirrorResumed)
 		{
 			m_mirrorResumeEvents.fetch_add(1);
+			reportMirrorState = claimMirrorStateDiagnosticWindow();
 		}
 		const bool mirrorTransportInterrupted = containsInsensitive(message, "awaiting reconnect")
 			&& (containsInsensitive(message, "mirror data")
@@ -1168,7 +1257,10 @@ public:
 			|| containsInsensitive(message, "error in select")
 			|| containsInsensitive(message, "error in accept"))
 		{
-			std::cerr << "[native-transport] level=" << level << " " << message << std::endl;
+			if (reportMirrorState)
+			{
+				std::cerr << "[native-transport] level=" << level << " " << message << std::endl;
+			}
 		}
 
 		if (level <= 3)
@@ -1181,11 +1273,13 @@ private:
 	void resetPipelineStats()
 	{
 		m_videoReceived.store(0);
+		m_videoFramesReceived.store(0);
 		m_videoEmitted.store(0);
 		m_videoDropped.store(0);
 		m_videoHeaderKeyFlags.store(0);
 		m_videoIdrAccessUnits.store(0);
 		m_videoCodecOnlyCallbacks.store(0);
+		m_videoDuplicateCodecCallbacks.store(0);
 		m_videoHeaderKeyWithoutIdr.store(0);
 		m_videoIdrWithoutHeaderKey.store(0);
 		m_mirrorPauseEvents.store(0);
@@ -1196,7 +1290,22 @@ private:
 		m_lastVideoInputTick.store(0);
 		m_lastAudioInputTick.store(0);
 		m_lastInvalidAudioDiagnosticTick.store(0);
+		m_lastMirrorStateDiagnosticTick.store(0);
 		m_mirrorTransportInterrupted.store(false);
+	}
+
+	bool claimMirrorStateDiagnosticWindow()
+	{
+		const unsigned long long now = GetTickCount64();
+		unsigned long long previous = m_lastMirrorStateDiagnosticTick.load();
+		while (previous == 0 || now - previous >= kMirrorStateDiagnosticIntervalMs)
+		{
+			if (m_lastMirrorStateDiagnosticTick.compare_exchange_weak(previous, now))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	bool claimInvalidAudioDiagnosticWindow()
@@ -1250,12 +1359,14 @@ private:
 			const unsigned long long now = GetTickCount64();
 			const unsigned long long lastVideo = m_lastVideoInputTick.load();
 			const unsigned long long lastAudio = m_lastAudioInputTick.load();
-			std::cerr << "[pipeline] video_in=" << m_videoReceived.load()
+			std::cerr << "[pipeline] video_au_in=" << m_videoReceived.load()
+				<< " video_frame_in=" << m_videoFramesReceived.load()
 				<< " video_out=" << m_videoEmitted.load()
 				<< " video_drop=" << m_videoDropped.load()
 				<< " header_key=" << m_videoHeaderKeyFlags.load()
 				<< " actual_idr=" << m_videoIdrAccessUnits.load()
 				<< " codec_only=" << m_videoCodecOnlyCallbacks.load()
+				<< " codec_dupe=" << m_videoDuplicateCodecCallbacks.load()
 				<< " header_key_no_idr=" << m_videoHeaderKeyWithoutIdr.load()
 				<< " idr_no_header_key=" << m_videoIdrWithoutHeaderKey.load()
 				<< " mirror_pause=" << m_mirrorPauseEvents.load()
@@ -1384,6 +1495,16 @@ private:
 		m_lastPts = 0;
 		m_lastDuration = kDefaultFrameDurationUs;
 		m_hasLastPts = false;
+		m_lastCodecPayload.clear();
+		resetGeometryLocked();
+	}
+
+	void resetGeometryLocked()
+	{
+		m_lastSourceWidth = 0;
+		m_lastSourceHeight = 0;
+		m_lastOutputWidth = 0;
+		m_lastOutputHeight = 0;
 	}
 
 	void clearPendingApprovalLocked()
@@ -1421,6 +1542,11 @@ private:
 	unsigned long long m_lastPts;
 	unsigned int m_lastDuration;
 	bool m_hasLastPts;
+	std::vector<unsigned char> m_lastCodecPayload;
+	unsigned int m_lastSourceWidth;
+	unsigned int m_lastSourceHeight;
+	unsigned int m_lastOutputWidth;
+	unsigned int m_lastOutputHeight;
 	std::mutex m_pairingMutex;
 	std::condition_variable m_pairingCv;
 	PairingApprovalState m_pairingApprovalState;
@@ -1450,11 +1576,13 @@ private:
 	std::atomic<bool> m_sessionActive{false};
 	std::atomic<bool> m_statsWorkerStopping;
 	std::atomic<unsigned long long> m_videoReceived{0};
+	std::atomic<unsigned long long> m_videoFramesReceived{0};
 	std::atomic<unsigned long long> m_videoEmitted{0};
 	std::atomic<unsigned long long> m_videoDropped{0};
 	std::atomic<unsigned long long> m_videoHeaderKeyFlags{0};
 	std::atomic<unsigned long long> m_videoIdrAccessUnits{0};
 	std::atomic<unsigned long long> m_videoCodecOnlyCallbacks{0};
+	std::atomic<unsigned long long> m_videoDuplicateCodecCallbacks{0};
 	std::atomic<unsigned long long> m_videoHeaderKeyWithoutIdr{0};
 	std::atomic<unsigned long long> m_videoIdrWithoutHeaderKey{0};
 	std::atomic<unsigned long long> m_mirrorPauseEvents{0};
@@ -1465,6 +1593,7 @@ private:
 	std::atomic<unsigned long long> m_lastVideoInputTick{0};
 	std::atomic<unsigned long long> m_lastAudioInputTick{0};
 	std::atomic<unsigned long long> m_lastInvalidAudioDiagnosticTick{0};
+	std::atomic<unsigned long long> m_lastMirrorStateDiagnosticTick{0};
 	std::atomic<bool> m_mirrorTransportInterrupted{false};
 	std::thread m_statsWorker;
 };

@@ -71,7 +71,9 @@ Changeable in real-time from the home screen or overlay:
 
 Requires Visual Studio 2022 (v143 toolset) and Windows 10 SDK.
 
-The `MirrorSimAdapter` sidecar exposes protocol `0.7.0`, including bounded H.264 access-unit and interleaved signed 16-bit PCM audio events plus sender-volume changes over JSONL. Video and audio serialization run on bounded worker queues so a busy desktop client cannot block the AirPlay network callback; overloaded video output drops forward to the next decoder keyframe instead of building an unbounded backlog.
+The `MirrorSimAdapter` sidecar exposes protocol `0.8.0`, including bounded H.264 access-unit and interleaved signed 16-bit PCM audio events, sender-volume changes, receiver-reported source/video geometry, and explicit mirror sender pause/resume events over JSONL. The source-screen shape provides orientation without mistaking a separate landscape media surface for a rotated phone. Video and audio serialization run on bounded worker queues so a busy desktop client cannot block the AirPlay network callback; overloaded video output drops forward to the next decoder keyframe instead of building an unbounded backlog, and repeated codec-only packets are deduplicated.
+
+When a host sets `MIRRORSIM_EXTERNAL_DNSSD=1`, the headless adapter skips its Bonjour client registration and lets the host advertise `_airplay._tcp` and `_raop._tcp` itself. `MIRRORSIM_HARDWARE_ADDRESS` accepts the shared 12-digit hexadecimal discovery identity, keeping AirPlay identity stable between the native protocol server and the external advertiser.
 
 The headless adapter advertises mirroring and audio capabilities only. Media apps therefore remain inside the mirrored screen instead of handing standalone playback to the receiver's intentionally unsupported URL/HLS path.
 

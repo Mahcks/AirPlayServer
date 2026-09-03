@@ -38,6 +38,11 @@ protected:
 	static void audio_flush(void* cls, void* session, const char* remoteName, const char* remoteDeviceId);
 	static void audio_destroy(void* cls, void* session, const char* remoteName, const char* remoteDeviceId);
 	static void video_process(void* cls, h264_decode_struct* data, const char* remoteName, const char* remoteDeviceId);
+	static void video_report_geometry(void* cls, float sourceWidth, float sourceHeight,
+		float outputWidth, float outputHeight,
+		const char* remoteName, const char* remoteDeviceId);
+	static void video_set_sender_paused(void* cls, int paused,
+		const char* remoteName, const char* remoteDeviceId);
 	static int pairing_request(
 		void* cls,
 		const char* remoteName,

@@ -16,6 +16,11 @@ public:
 	virtual void outputAudio(SFgAudioFrame* data, const char* remoteName, const char* remoteDeviceId) = 0;
 	virtual void outputH264AccessUnit(SFgH264AccessUnit* data, const char* remoteName, const char* remoteDeviceId) = 0;
 	virtual void outputVideo(SFgVideoFrame* data, const char* remoteName, const char* remoteDeviceId) = 0;
+	virtual void videoGeometryChanged(float sourceWidth, float sourceHeight,
+		float outputWidth, float outputHeight,
+		const char* remoteName, const char* remoteDeviceId) = 0;
+	virtual void videoSenderPausedChanged(bool paused,
+		const char* remoteName, const char* remoteDeviceId) = 0;
 
 	virtual void videoPlay(char* url, double volume, double startPos) = 0;
 	virtual void videoGetPlayInfo(double* duration, double* position, double* rate) = 0;

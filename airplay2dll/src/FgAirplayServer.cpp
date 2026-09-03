@@ -20,6 +20,45 @@ namespace {
 
 constexpr size_t kPairingSeedSize = 32;
 
+bool environmentFlagEnabled(const char* name)
+{
+	char value[8] = {};
+	const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
+	return length > 0 && length < sizeof(value)
+		&& (value[0] == '1' || value[0] == 'y' || value[0] == 'Y'
+			|| value[0] == 't' || value[0] == 'T');
+}
+
+int hexNibble(char value)
+{
+	if (value >= '0' && value <= '9') { return value - '0'; }
+	if (value >= 'a' && value <= 'f') { return value - 'a' + 10; }
+	if (value >= 'A' && value <= 'F') { return value - 'A' + 10; }
+	return -1;
+}
+
+bool loadConfiguredHardwareAddress(char address[6])
+{
+	char value[32] = {};
+	const DWORD length = GetEnvironmentVariableA("MIRRORSIM_HARDWARE_ADDRESS", value, sizeof(value));
+	if (length != 12)
+	{
+		return false;
+	}
+
+	for (size_t index = 0; index < 6; ++index)
+	{
+		const int high = hexNibble(value[index * 2]);
+		const int low = hexNibble(value[index * 2 + 1]);
+		if (high < 0 || low < 0)
+		{
+			return false;
+		}
+		address[index] = static_cast<char>((high << 4) | low);
+	}
+	return true;
+}
+
 std::string pairingSeedPath()
 {
 	char appData[MAX_PATH] = {};
@@ -116,6 +155,8 @@ FgAirplayServer::FgAirplayServer()
 	m_stRaopCB.pairing_request = pairing_request;
 	// m_stRaopCB.audio_destroy = audio_destroy;
 	m_stRaopCB.video_process = video_process;
+	m_stRaopCB.video_report_geometry = video_report_geometry;
+	m_stRaopCB.video_set_sender_paused = video_set_sender_paused;
 
 	m_mutexMap = CreateMutex(NULL, FALSE, NULL);
 }
@@ -138,15 +179,19 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 
 	unsigned short raop_port = raopPort;
 	unsigned short airplay_port = airplayPort;
-	char hwaddr[] = { 0x48, 0x5d, 0x60, 0x7c, 0xee, 0x22 };
+	char hwaddr[] = { 0x48, 0x5d, 0x60, 0x7c, static_cast<char>(0xee), 0x22 };
 	char* pemstr = NULL;
 	std::array<unsigned char, kPairingSeedSize> pairingSeed = {};
 	const bool hasPersistentPairingSeed = loadOrCreatePairingSeed(pairingSeed);
+	const bool externalDiscovery = environmentFlagEnabled("MIRRORSIM_EXTERNAL_DNSSD");
 
 	int ret = 0;
 	do {
 
-		GetMacAddress(hwaddr);
+		if (!loadConfiguredHardwareAddress(hwaddr))
+		{
+			GetMacAddress(hwaddr);
+		}
 
 		m_pAirplay = hasPersistentPairingSeed
 			? airplay_init_with_seed(10, &m_stAirplayCB, pemstr, pairingSeed.data(), &ret)
@@ -156,7 +201,8 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 			break;
 		}
 		ret = airplay_start(m_pAirplay, &airplay_port, hwaddr, sizeof(hwaddr), NULL);
-		if (ret < 0) {
+		if (ret != 1) {
+			ret = -1;
 			break;
 		}
 		airplay_set_log_level(m_pAirplay, RAOP_LOG_DEBUG);
@@ -173,23 +219,32 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 		raop_set_log_level(m_pRaop, RAOP_LOG_DEBUG);
 		raop_set_log_callback(m_pRaop, &log_callback, this);
 		ret = raop_start(m_pRaop, &raop_port);
-		if (ret < 0) {
-			break;
-		}
-		raop_set_port(m_pRaop, raop_port);
-
-		m_pDnsSd = dnssd_init(&ret);
-		if (m_pDnsSd == NULL) {
+		if (ret != 1) {
 			ret = -1;
 			break;
 		}
-		ret = dnssd_register_raop(m_pDnsSd, serverName, raop_port, hwaddr, sizeof(hwaddr), 0);
-		if (ret < 0) {
-			break;
+		raop_set_port(m_pRaop, raop_port);
+		ret = 0;
+
+		if (!externalDiscovery)
+		{
+			m_pDnsSd = dnssd_init(&ret);
+			if (m_pDnsSd == NULL) {
+				ret = -1;
+				break;
+			}
+			ret = dnssd_register_raop(m_pDnsSd, serverName, raop_port, hwaddr, sizeof(hwaddr), 0);
+			if (ret < 0) {
+				break;
+			}
+			ret = dnssd_register_airplay(m_pDnsSd, serverName, airplay_port, hwaddr, sizeof(hwaddr));
+			if (ret < 0) {
+				break;
+			}
 		}
-		ret = dnssd_register_airplay(m_pDnsSd, serverName, airplay_port, hwaddr, sizeof(hwaddr));
-		if (ret < 0) {
-			break;
+		else
+		{
+			raop_log_info(m_pRaop, "External DNS-SD advertisement enabled");
 		}
 
 		raop_log_info(m_pRaop, "Startup complete... Kill with Ctrl+C\n");
@@ -199,7 +254,7 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 		stop();
 	}
 
-	return 0;
+	return ret;
 }
 
 void FgAirplayServer::stop()
@@ -511,6 +566,32 @@ void FgAirplayServer::video_process(void* cls, h264_decode_struct* h264data, con
 	}
 	delete[] pData->data;
 	delete pData;
+}
+
+void FgAirplayServer::video_report_geometry(void* cls, float sourceWidth, float sourceHeight,
+	float outputWidth, float outputHeight,
+	const char* remoteName, const char* remoteDeviceId)
+{
+	FgAirplayServer* pServer = (FgAirplayServer*)cls;
+	if (pServer == NULL || pServer->m_pCallback == NULL)
+	{
+		return;
+	}
+
+	pServer->m_pCallback->videoGeometryChanged(sourceWidth, sourceHeight,
+		outputWidth, outputHeight, remoteName, remoteDeviceId);
+}
+
+void FgAirplayServer::video_set_sender_paused(void* cls, int paused,
+	const char* remoteName, const char* remoteDeviceId)
+{
+	FgAirplayServer* pServer = (FgAirplayServer*)cls;
+	if (pServer == NULL || pServer->m_pCallback == NULL)
+	{
+		return;
+	}
+
+	pServer->m_pCallback->videoSenderPausedChanged(paused != 0, remoteName, remoteDeviceId);
 }
 
 void FgAirplayServer::ap_video_play(void* cls, char* url, double volume, double start_pos)

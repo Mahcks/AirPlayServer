@@ -93,6 +93,26 @@ void CAirServerCallback::outputVideo(SFgVideoFrame* data, const char* remoteName
 	}
 }
 
+void CAirServerCallback::videoGeometryChanged(float sourceWidth, float sourceHeight,
+	float outputWidth, float outputHeight,
+	const char* remoteName, const char* remoteDeviceId)
+{
+	UNREFERENCED_PARAMETER(sourceWidth);
+	UNREFERENCED_PARAMETER(sourceHeight);
+	UNREFERENCED_PARAMETER(outputWidth);
+	UNREFERENCED_PARAMETER(outputHeight);
+	UNREFERENCED_PARAMETER(remoteName);
+	UNREFERENCED_PARAMETER(remoteDeviceId);
+}
+
+void CAirServerCallback::videoSenderPausedChanged(bool paused,
+	const char* remoteName, const char* remoteDeviceId)
+{
+	UNREFERENCED_PARAMETER(paused);
+	UNREFERENCED_PARAMETER(remoteName);
+	UNREFERENCED_PARAMETER(remoteDeviceId);
+}
+
 void CAirServerCallback::videoPlay(char* url, double volume, double startPos)
 {
 	printf("Play: %s", url);

@@ -6,7 +6,10 @@ void* fgServerStart(const char serverName[AIRPLAY_NAME_LEN],
 	IAirServerCallback* callback) 
 {
 	FgAirplayServer* pServer = new FgAirplayServer();
-	pServer->start(serverName, raopPort, airplayPort, callback, false);
+	if (pServer->start(serverName, raopPort, airplayPort, callback, false) != 0) {
+		delete pServer;
+		return NULL;
+	}
 	return pServer;
 }
 
@@ -15,7 +18,10 @@ void* fgServerStartHeadless(const char serverName[AIRPLAY_NAME_LEN],
 	IAirServerCallback* callback)
 {
 	FgAirplayServer* pServer = new FgAirplayServer();
-	pServer->start(serverName, raopPort, airplayPort, callback, true);
+	if (pServer->start(serverName, raopPort, airplayPort, callback, true) != 0) {
+		delete pServer;
+		return NULL;
+	}
 	return pServer;
 }
 

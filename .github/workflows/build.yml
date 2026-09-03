@@ -38,7 +38,7 @@ jobs:
       - name: Build solution (Release|x64)
         run: msbuild AirPlay.sln /p:Configuration=Release /p:Platform=x64 /m
 
-      - name: Verify adapter protocol and shutdown
+      - name: Verify adapter protocol and AirPlay listeners
         shell: pwsh
         run: |
           $featureHeader = Get-Content -Raw -LiteralPath 'AirPlayServerLib/lib/global.h'
@@ -53,35 +53,7 @@ jobs:
             throw 'Mirror timing probes must keep their bounded 300 ms response window and three-second cadence.'
           }
 
-          $adapter = Join-Path $env:RUNTIME_DIR 'MirrorSimAdapter.exe'
-          if (-not (Test-Path -LiteralPath $adapter)) {
-            throw "Expected runtime output '$adapter' was not produced."
-          }
-
-          Push-Location $env:RUNTIME_DIR
-          try {
-            $output = '{"name":"shutdown"}' | & '.\MirrorSimAdapter.exe'
-            if ($LASTEXITCODE -ne 0) {
-              throw "MirrorSimAdapter smoke test exited with code $LASTEXITCODE."
-            }
-            $events = @($output | ForEach-Object { $_ | ConvertFrom-Json })
-            $ready = $events | Where-Object { $_.name -eq 'receiver_ready' } | Select-Object -First 1
-            if ($null -eq $ready) {
-              throw 'MirrorSimAdapter did not emit receiver_ready.'
-            }
-            if ($ready.protocol_version -ne '0.7.0') {
-              throw "Expected adapter protocol 0.7.0, received '$($ready.protocol_version)'."
-            }
-            if ($ready.capabilities -notcontains 'pcm-audio') {
-              throw 'MirrorSimAdapter did not advertise the required pcm-audio capability.'
-            }
-            if ($ready.capabilities -notcontains 'sender-volume') {
-              throw 'MirrorSimAdapter did not advertise the required sender-volume capability.'
-            }
-          }
-          finally {
-            Pop-Location
-          }
+          .\.github\scripts\Test-MirrorSimAdapter.ps1 -RuntimeDir $env:RUNTIME_DIR
 
       - name: Create runtime archive and checksum
         shell: pwsh

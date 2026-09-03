@@ -40,6 +40,11 @@ struct raop_callbacks_s {
 	void (*disconnected)(void* cls, const char* remoteName, const char* remoteDeviceId);
 	void  (*audio_process)(void *cls, pcm_data_struct *data, const char* remoteName, const char* remoteDeviceId);
     void  (*video_process)(void *cls, h264_decode_struct *data, const char* remoteName, const char* remoteDeviceId);
+	void  (*video_report_geometry)(void *cls, float sourceWidth, float sourceHeight,
+		float outputWidth, float outputHeight,
+		const char* remoteName, const char* remoteDeviceId);
+	void  (*video_set_sender_paused)(void *cls, int paused,
+		const char* remoteName, const char* remoteDeviceId);
 
 	/* Optional but recommended callback functions */
 	void  (*audio_flush)(void *cls, void *session, const char* remoteName, const char* remoteDeviceId);
