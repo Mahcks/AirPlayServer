@@ -962,10 +962,6 @@ public:
 		PendingVideoAccessUnit frame;
 		unsigned int duration = data->duration;
 		const AnnexBNalSummary nalSummary = inspectAnnexBNals(data->data, data->dataLen);
-		if (nalSummary.containsVcl)
-		{
-			m_mirrorSenderPaused.store(false);
-		}
 		const bool callbackHeaderKey = data->isKey != 0;
 		if (callbackHeaderKey)
 		{
@@ -1104,20 +1100,20 @@ public:
 		if (mirrorPaused)
 		{
 			m_mirrorPauseEvents.fetch_add(1);
-			m_mirrorSenderPaused.store(true);
 		}
 		if (mirrorResumed)
 		{
 			m_mirrorResumeEvents.fetch_add(1);
-			m_mirrorSenderPaused.store(false);
 		}
 		const bool mirrorTransportInterrupted = containsInsensitive(message, "awaiting reconnect")
 			&& (containsInsensitive(message, "mirror data")
 				|| containsInsensitive(message, "mirror packet header")
 				|| (containsInsensitive(message, "mirror")
 					&& containsInsensitive(message, "payload")));
+		// A pause control packet by itself is harmless. Once the data socket is
+		// gone, always surface bounded reconnect handling; otherwise a pause
+		// immediately followed by FIN can leave the desktop falsely live forever.
 		if (mirrorTransportInterrupted
-			&& !m_mirrorSenderPaused.load()
 			&& !m_mirrorTransportInterrupted.exchange(true))
 		{
 			emitDiscontinuity("mirror_transport_interrupted", false);
@@ -1159,7 +1155,6 @@ private:
 		m_lastAudioInputTick.store(0);
 		m_lastInvalidAudioDiagnosticTick.store(0);
 		m_mirrorTransportInterrupted.store(false);
-		m_mirrorSenderPaused.store(false);
 	}
 
 	bool claimInvalidAudioDiagnosticWindow()
@@ -1429,7 +1424,6 @@ private:
 	std::atomic<unsigned long long> m_lastAudioInputTick{0};
 	std::atomic<unsigned long long> m_lastInvalidAudioDiagnosticTick{0};
 	std::atomic<bool> m_mirrorTransportInterrupted{false};
-	std::atomic<bool> m_mirrorSenderPaused{false};
 	std::thread m_statsWorker;
 };
 
