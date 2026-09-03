@@ -20,7 +20,7 @@ A high-performance AirPlay receiver for Windows with real-time video streaming a
 
 ## Features
 
-- **Full AirPlay Support**: Stream video, audio, and mirror your screen from iOS/macOS devices
+- **Screen Mirroring + Audio**: Mirror iOS/macOS screens with decoded PCM audio without advertising unsupported standalone URL/HLS playback
 - **Quality Presets**: Good Quality (30 FPS, Lanczos), Balanced (60 FPS, bilinear), Fast Speed (60 FPS, nearest-neighbor)
 - **Smooth Playback**: Frame pacing with optimized rendering for stutter-free video
 - **Low Latency**: Efficient YUV to RGB conversion with GPU texture upload
@@ -70,6 +70,10 @@ Changeable in real-time from the home screen or overlay:
 ## Building from Source
 
 Requires Visual Studio 2022 (v143 toolset) and Windows 10 SDK.
+
+The `MirrorSimAdapter` sidecar exposes protocol `0.6.0`, including bounded H.264 access-unit and interleaved signed 16-bit PCM audio events over JSONL. Video and audio serialization run on bounded worker queues so a busy desktop client cannot block the AirPlay network callback; overloaded video output drops forward to the next decoder keyframe instead of building an unbounded backlog.
+
+The headless adapter advertises mirroring and audio capabilities only. Media apps therefore remain inside the mirrored screen instead of handing standalone playback to the receiver's intentionally unsupported URL/HLS path.
 
 1. Clone the repository
    ```bash

@@ -161,7 +161,7 @@ const char *eventStrings[] = { "playing", "paused", "loading", "stopped" };
 "<key>deviceid</key>\r\n"\
 "<string>%s</string>\r\n"\
 "<key>features</key>\r\n"\
-"<integer>119</integer>\r\n"\
+"<integer>"GLOBAL_FEATURES_DECIMAL"</integer>\r\n"\
 "<key>model</key>\r\n"\
 "<string>Kodi,1</string>\r\n"\
 "<key>protovers</key>\r\n"\

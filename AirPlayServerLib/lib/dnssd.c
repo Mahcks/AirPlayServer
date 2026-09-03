@@ -431,7 +431,7 @@ dnssd_register_airplay(dnssd_t *dnssd, const char *name, unsigned short port, co
 {
 	TXTRecordRef txtRecord;
 	char deviceid[3*MAX_HWADDR_LEN];
-	char features[16];
+	char features[32];
 	int ret;
 	int i;
 	int registered = 0;
@@ -455,7 +455,7 @@ dnssd_register_airplay(dnssd_t *dnssd, const char *name, unsigned short port, co
 	}
 
 	features[sizeof(features)-1] = '\0';
-	snprintf(features, sizeof(features)-1, "0x%x", GLOBAL_FEATURES);
+	snprintf(features, sizeof(features)-1, "%s", GLOBAL_FEATURES_TXT);
 
 	dnssd->airplayServiceCount = 0;
 
@@ -481,7 +481,7 @@ dnssd_register_airplay(dnssd_t *dnssd, const char *name, unsigned short port, co
 		dnssd->TXTRecordCreate(&txtRecord, 0, NULL);
 		dnssd->TXTRecordSetValue(&txtRecord, "srcvers", strlen(GLOBAL_VERSION), GLOBAL_VERSION);
 		dnssd->TXTRecordSetValue(&txtRecord, "deviceid", strlen(deviceid), deviceid);
-		dnssd->TXTRecordSetValue(&txtRecord, "features", strlen("0x5A7FFFF7, 0x1E"), "0x5A7FFFF7,0x1E");
+		dnssd->TXTRecordSetValue(&txtRecord, "features", strlen(features), features);
 		dnssd->TXTRecordSetValue(&txtRecord, "model", strlen(GLOBAL_MODEL), GLOBAL_MODEL);
 		dnssd->TXTRecordSetValue(&txtRecord, "flags", strlen(RAOP_SF), RAOP_SF);
 		dnssd->TXTRecordSetValue(&txtRecord, "vv", strlen(RAOP_VV), RAOP_VV);

@@ -5,12 +5,14 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <algorithm>
+#include <thread>
 #include <vector>
 
 #include "Airplay2Head.h"
@@ -21,6 +23,13 @@ constexpr unsigned int kDefaultFrameDurationUs = 16667;
 constexpr unsigned int kMinFrameDurationUs = 8000;
 constexpr unsigned int kMaxFrameDurationUs = 50000;
 constexpr unsigned int kMaxAccessUnitBytes = 8 * 1024 * 1024;
+constexpr unsigned int kMaxAudioFrameBytes = 1024 * 1024;
+constexpr size_t kMaxQueuedVideoFrames = 120;
+constexpr size_t kMaxQueuedVideoBytes = 64 * 1024 * 1024;
+constexpr size_t kMaxQueuedAudioFrames = 12;
+constexpr size_t kMaxCombinedAudioFrames = 4;
+constexpr size_t kMaxCombinedAudioBytes = 64 * 1024;
+constexpr unsigned long long kInvalidAudioDiagnosticIntervalMs = 5000;
 
 std::string jsonEscape(const std::string& value)
 {
@@ -242,9 +251,77 @@ SidecarCommandType parseCommandType(const std::string& line)
 	return SidecarCommandType::Unknown;
 }
 
+struct AnnexBNalSummary {
+	bool containsVcl = false;
+	bool containsIdr = false;
+	bool containsSps = false;
+	bool containsPps = false;
+};
+
+AnnexBNalSummary inspectAnnexBNals(const unsigned char* data, size_t length)
+{
+	AnnexBNalSummary summary;
+	for (size_t index = 0; index + 3 < length; ++index)
+	{
+		size_t nalOffset = 0;
+		if (data[index] == 0 && data[index + 1] == 0 && data[index + 2] == 1)
+		{
+			nalOffset = index + 3;
+		}
+		else if (index + 4 < length && data[index] == 0 && data[index + 1] == 0
+			&& data[index + 2] == 0 && data[index + 3] == 1)
+		{
+			nalOffset = index + 4;
+		}
+
+		if (nalOffset == 0 || nalOffset >= length)
+		{
+			continue;
+		}
+
+		const unsigned char nalType = data[nalOffset] & 0x1f;
+		if (nalType >= 1 && nalType <= 5)
+		{
+			summary.containsVcl = true;
+		}
+		if (nalType == 5)
+		{
+			summary.containsIdr = true;
+		}
+		else if (nalType == 7)
+		{
+			summary.containsSps = true;
+		}
+		else if (nalType == 8)
+		{
+			summary.containsPps = true;
+		}
+	}
+	return summary;
+}
+
 struct PairingCorrelation {
 	std::string sessionId;
 	std::string challengeId;
+};
+
+struct PendingAudioFrame {
+	std::string streamId;
+	unsigned long long pts = 0;
+	unsigned int sampleRate = 0;
+	unsigned short channels = 0;
+	unsigned short bitsPerSample = 0;
+	std::vector<unsigned char> payload;
+};
+
+struct PendingVideoAccessUnit {
+	std::string streamId;
+	unsigned int sampleIndex = 0;
+	bool keyframe = false;
+	unsigned long long pts = 0;
+	unsigned long long dts = 0;
+	unsigned int duration = 0;
+	std::vector<unsigned char> payload;
 };
 
 class MirrorSimCallback : public IAirServerCallback
@@ -266,7 +343,45 @@ public:
 		, m_lastPairingPhase("idle")
 		, m_pairingApprovalState(PairingApprovalState::Idle)
 		, m_pairingGeneration(0)
+		, m_videoQueueBytes(0)
+		, m_videoWorkerStopping(false)
+		, m_videoDropUntilKeyframe(false)
+		, m_audioWorkerStopping(false)
+		, m_statsWorkerStopping(false)
 	{
+		m_videoWorker = std::thread(&MirrorSimCallback::runVideoWorker, this);
+		m_audioWorker = std::thread(&MirrorSimCallback::runAudioWorker, this);
+		m_statsWorker = std::thread(&MirrorSimCallback::runStatsWorker, this);
+	}
+
+	~MirrorSimCallback()
+	{
+		m_statsWorkerStopping.store(true);
+		{
+			std::lock_guard<std::mutex> lock(m_videoQueueMutex);
+			m_videoWorkerStopping = true;
+			m_videoQueue.clear();
+			m_videoQueueBytes = 0;
+		}
+		m_videoQueueCv.notify_all();
+		{
+			std::lock_guard<std::mutex> lock(m_audioQueueMutex);
+			m_audioWorkerStopping = true;
+			m_audioQueue.clear();
+		}
+		m_audioQueueCv.notify_all();
+		if (m_audioWorker.joinable())
+		{
+			m_audioWorker.join();
+		}
+		if (m_videoWorker.joinable())
+		{
+			m_videoWorker.join();
+		}
+		if (m_statsWorker.joinable())
+		{
+			m_statsWorker.join();
+		}
 	}
 
 	void setServerHandle(void* serverHandle)
@@ -277,6 +392,10 @@ public:
 
 	void setPendingSession(const std::string& sessionId, const std::string& streamId)
 	{
+		m_sessionActive.store(false);
+		resetPipelineStats();
+		clearQueuedVideo();
+		clearQueuedAudio();
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
 			m_sessionId = sessionId;
@@ -291,7 +410,10 @@ public:
 
 	void clearSession()
 	{
+		m_sessionActive.store(false);
 		cancelAnyPendingTrust("The receiver session ended.");
+		clearQueuedVideo();
+		clearQueuedAudio();
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
 			m_sessionId.clear();
@@ -303,7 +425,10 @@ public:
 
 	void clearSender()
 	{
+		m_sessionActive.store(false);
 		cancelAnyPendingTrust("The iPhone disconnected before pairing completed.");
+		clearQueuedVideo();
+		clearQueuedAudio();
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
 			clearSenderLocked();
@@ -322,7 +447,7 @@ public:
 
 	void emitReceiverReady()
 	{
-		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.5.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
+		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.6.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\"]}");
 	}
 
 	void emitReceiverError(const std::string& code, const std::string& message, bool recoverable)
@@ -709,6 +834,7 @@ public:
 
 	virtual void connected(const char* remoteName, const char* remoteDeviceId) override
 	{
+		m_sessionActive.store(true);
 		std::string sessionId;
 		std::string streamId;
 		std::string deviceName = remoteName ? remoteName : "AirPlay sender";
@@ -783,9 +909,41 @@ public:
 
 	virtual void outputAudio(SFgAudioFrame* data, const char* remoteName, const char* remoteDeviceId) override
 	{
-		(void)data;
 		(void)remoteName;
 		(void)remoteDeviceId;
+		if (!data || !data->data || data->dataLen == 0 || data->dataLen > kMaxAudioFrameBytes
+			|| data->sampleRate < 8000 || data->sampleRate > 192000
+			|| data->channels == 0 || data->channels > 2 || data->bitsPerSample != 16
+			|| data->dataLen % (data->channels * 2) != 0)
+		{
+			m_audioDropped.fetch_add(1);
+			emitInvalidAudioDiagnostic("The receiver dropped invalid PCM audio.");
+			return;
+		}
+		m_audioReceived.fetch_add(1);
+		m_lastAudioInputTick.store(GetTickCount64());
+
+		PendingAudioFrame frame;
+		{
+			std::lock_guard<std::mutex> lock(m_stateMutex);
+			frame.streamId = m_streamId.empty() ? "stream-unknown" : m_streamId;
+		}
+		frame.pts = data->pts;
+		frame.sampleRate = data->sampleRate;
+		frame.channels = data->channels;
+		frame.bitsPerSample = data->bitsPerSample;
+		frame.payload.assign(data->data, data->data + data->dataLen);
+
+		{
+			std::lock_guard<std::mutex> lock(m_audioQueueMutex);
+			while (m_audioQueue.size() >= kMaxQueuedAudioFrames)
+			{
+				m_audioQueue.pop_front();
+				m_audioDropped.fetch_add(1);
+			}
+			m_audioQueue.push_back(std::move(frame));
+		}
+		m_audioQueueCv.notify_one();
 	}
 
 	virtual void outputH264AccessUnit(SFgH264AccessUnit* data, const char* remoteName, const char* remoteDeviceId) override
@@ -794,16 +952,45 @@ public:
 		(void)remoteDeviceId;
 		if (!data || !data->data || data->dataLen == 0 || data->dataLen > kMaxAccessUnitBytes)
 		{
+			m_videoDropped.fetch_add(1);
 			emitReceiverError("invalid_video_access_unit", "The receiver dropped an invalid or oversized H.264 access unit.", true);
 			return;
 		}
-		std::string streamId;
-		unsigned int sampleIndex = 0;
+		m_mirrorTransportInterrupted.store(false);
+		m_videoReceived.fetch_add(1);
+		m_lastVideoInputTick.store(GetTickCount64());
+		PendingVideoAccessUnit frame;
 		unsigned int duration = data->duration;
+		const AnnexBNalSummary nalSummary = inspectAnnexBNals(data->data, data->dataLen);
+		if (nalSummary.containsVcl)
+		{
+			m_mirrorSenderPaused.store(false);
+		}
+		const bool callbackHeaderKey = data->isKey != 0;
+		if (callbackHeaderKey)
+		{
+			m_videoHeaderKeyFlags.fetch_add(1);
+		}
+		if (nalSummary.containsIdr)
+		{
+			m_videoIdrAccessUnits.fetch_add(1);
+		}
+		if (!nalSummary.containsVcl && (nalSummary.containsSps || nalSummary.containsPps))
+		{
+			m_videoCodecOnlyCallbacks.fetch_add(1);
+		}
+		if (callbackHeaderKey && !nalSummary.containsIdr)
+		{
+			m_videoHeaderKeyWithoutIdr.fetch_add(1);
+		}
+		if (!callbackHeaderKey && nalSummary.containsIdr)
+		{
+			m_videoIdrWithoutHeaderKey.fetch_add(1);
+		}
 		{
 			std::lock_guard<std::mutex> lock(m_stateMutex);
-			streamId = m_streamId.empty() ? "stream-unknown" : m_streamId;
-			sampleIndex = m_sampleIndex++;
+			frame.streamId = m_streamId.empty() ? "stream-unknown" : m_streamId;
+			frame.sampleIndex = m_sampleIndex++;
 
 			if (m_hasLastPts && data->pts > m_lastPts)
 			{
@@ -834,16 +1021,38 @@ public:
 			}
 		}
 
-		const std::string payload = base64Encode(data->data, data->dataLen);
-		std::ostringstream event;
-		event << "{\"name\":\"video_access_unit\",\"stream_id\":\"" << jsonEscape(streamId)
-			  << "\",\"sample_index\":" << sampleIndex
-			  << ",\"keyframe\":" << (data->isKey ? "true" : "false")
-			  << ",\"pts\":" << data->pts
-			  << ",\"dts\":" << data->dts
-			  << ",\"duration\":" << duration
-			  << ",\"payloadBase64\":\"" << payload << "\"}";
-		emitJson(event.str());
+		frame.keyframe = callbackHeaderKey || nalSummary.containsIdr;
+		frame.pts = data->pts;
+		frame.dts = data->dts;
+		frame.duration = duration;
+		frame.payload.assign(data->data, data->data + data->dataLen);
+
+		{
+			std::lock_guard<std::mutex> lock(m_videoQueueMutex);
+			const bool wouldOverflow = m_videoQueue.size() >= kMaxQueuedVideoFrames
+				|| m_videoQueueBytes + frame.payload.size() > kMaxQueuedVideoBytes;
+			if (wouldOverflow)
+			{
+				m_videoDropped.fetch_add(static_cast<unsigned long long>(m_videoQueue.size()));
+				m_videoQueue.clear();
+				m_videoQueueBytes = 0;
+				m_videoDropUntilKeyframe = true;
+			}
+
+			if (m_videoDropUntilKeyframe && !nalSummary.containsIdr)
+			{
+				m_videoDropped.fetch_add(1);
+				return;
+			}
+
+			if (nalSummary.containsIdr)
+			{
+				m_videoDropUntilKeyframe = false;
+			}
+			m_videoQueueBytes += frame.payload.size();
+			m_videoQueue.push_back(std::move(frame));
+		}
+		m_videoQueueCv.notify_one();
 	}
 
 	virtual void outputVideo(SFgVideoFrame* data, const char* remoteName, const char* remoteDeviceId) override
@@ -858,6 +1067,10 @@ public:
 		(void)url;
 		(void)volume;
 		(void)startPos;
+		emitReceiverError(
+			"unsupported_direct_video",
+			"The iPhone attempted standalone AirPlay video playback. MirrorSim supports Screen Mirroring and is waiting for the mirrored stream to resume.",
+			true);
 	}
 
 	virtual void videoGetPlayInfo(double* duration, double* position, double* rate) override
@@ -878,6 +1091,47 @@ public:
 	{
 		const std::string message = msg ? msg : "native receiver error";
 		handlePairingLog(message);
+		const bool audioDecodeFailure = containsInsensitive(message, "aacdecoder_fill error")
+			|| containsInsensitive(message, "aacdecoder_decodeframe error");
+		if (audioDecodeFailure)
+		{
+			m_audioDropped.fetch_add(1);
+			emitInvalidAudioDiagnostic(message);
+			return;
+		}
+		const bool mirrorPaused = containsInsensitive(message, "mirror video stream paused by sender");
+		const bool mirrorResumed = containsInsensitive(message, "mirror video stream resumed by sender");
+		if (mirrorPaused)
+		{
+			m_mirrorPauseEvents.fetch_add(1);
+			m_mirrorSenderPaused.store(true);
+		}
+		if (mirrorResumed)
+		{
+			m_mirrorResumeEvents.fetch_add(1);
+			m_mirrorSenderPaused.store(false);
+		}
+		const bool mirrorTransportInterrupted = containsInsensitive(message, "awaiting reconnect")
+			&& (containsInsensitive(message, "mirror data")
+				|| containsInsensitive(message, "mirror packet header")
+				|| (containsInsensitive(message, "mirror")
+					&& containsInsensitive(message, "payload")));
+		if (mirrorTransportInterrupted
+			&& !m_mirrorSenderPaused.load()
+			&& !m_mirrorTransportInterrupted.exchange(true))
+		{
+			emitDiscontinuity("mirror_transport_interrupted", false);
+		}
+		if (containsInsensitive(message, "mirror data")
+			|| containsInsensitive(message, "awaiting reconnect")
+			|| containsInsensitive(message, "malformed h264")
+			|| containsInsensitive(message, "mirror payload")
+			|| containsInsensitive(message, "mirror video stream")
+			|| containsInsensitive(message, "error in select")
+			|| containsInsensitive(message, "error in accept"))
+		{
+			std::cerr << "[native-transport] level=" << level << " " << message << std::endl;
+		}
 
 		if (level <= 3)
 		{
@@ -886,6 +1140,197 @@ public:
 	}
 
 private:
+	void resetPipelineStats()
+	{
+		m_videoReceived.store(0);
+		m_videoEmitted.store(0);
+		m_videoDropped.store(0);
+		m_videoHeaderKeyFlags.store(0);
+		m_videoIdrAccessUnits.store(0);
+		m_videoCodecOnlyCallbacks.store(0);
+		m_videoHeaderKeyWithoutIdr.store(0);
+		m_videoIdrWithoutHeaderKey.store(0);
+		m_mirrorPauseEvents.store(0);
+		m_mirrorResumeEvents.store(0);
+		m_audioReceived.store(0);
+		m_audioEmitted.store(0);
+		m_audioDropped.store(0);
+		m_lastVideoInputTick.store(0);
+		m_lastAudioInputTick.store(0);
+		m_lastInvalidAudioDiagnosticTick.store(0);
+		m_mirrorTransportInterrupted.store(false);
+		m_mirrorSenderPaused.store(false);
+	}
+
+	bool claimInvalidAudioDiagnosticWindow()
+	{
+		const unsigned long long now = GetTickCount64();
+		unsigned long long previous = m_lastInvalidAudioDiagnosticTick.load();
+		while (previous == 0 || now - previous >= kInvalidAudioDiagnosticIntervalMs)
+		{
+			if (m_lastInvalidAudioDiagnosticTick.compare_exchange_weak(previous, now))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void emitInvalidAudioDiagnostic(const std::string& message)
+	{
+		if (m_sessionActive.load() && claimInvalidAudioDiagnosticWindow())
+		{
+			std::cerr << "[native-audio] " << message
+				<< " Additional audio decode errors are suppressed for five seconds."
+				<< std::endl;
+		}
+	}
+
+	void runStatsWorker()
+	{
+		unsigned int ticks = 0;
+		while (!m_statsWorkerStopping.load())
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+			if (m_statsWorkerStopping.load() || !m_sessionActive.load() || ++ticks % 4 != 0)
+			{
+				continue;
+			}
+
+			size_t videoDepth = 0;
+			size_t videoBytes = 0;
+			size_t audioDepth = 0;
+			{
+				std::lock_guard<std::mutex> lock(m_videoQueueMutex);
+				videoDepth = m_videoQueue.size();
+				videoBytes = m_videoQueueBytes;
+			}
+			{
+				std::lock_guard<std::mutex> lock(m_audioQueueMutex);
+				audioDepth = m_audioQueue.size();
+			}
+
+			const unsigned long long now = GetTickCount64();
+			const unsigned long long lastVideo = m_lastVideoInputTick.load();
+			const unsigned long long lastAudio = m_lastAudioInputTick.load();
+			std::cerr << "[pipeline] video_in=" << m_videoReceived.load()
+				<< " video_out=" << m_videoEmitted.load()
+				<< " video_drop=" << m_videoDropped.load()
+				<< " header_key=" << m_videoHeaderKeyFlags.load()
+				<< " actual_idr=" << m_videoIdrAccessUnits.load()
+				<< " codec_only=" << m_videoCodecOnlyCallbacks.load()
+				<< " header_key_no_idr=" << m_videoHeaderKeyWithoutIdr.load()
+				<< " idr_no_header_key=" << m_videoIdrWithoutHeaderKey.load()
+				<< " mirror_pause=" << m_mirrorPauseEvents.load()
+				<< " mirror_resume=" << m_mirrorResumeEvents.load()
+				<< " video_q=" << videoDepth
+				<< " video_q_bytes=" << videoBytes
+				<< " video_age_ms=" << (lastVideo == 0 ? 0 : now - lastVideo)
+				<< " audio_in=" << m_audioReceived.load()
+				<< " audio_out=" << m_audioEmitted.load()
+				<< " audio_drop=" << m_audioDropped.load()
+				<< " audio_q=" << audioDepth
+				<< " audio_age_ms=" << (lastAudio == 0 ? 0 : now - lastAudio)
+				<< std::endl;
+		}
+	}
+
+	void clearQueuedVideo()
+	{
+		std::lock_guard<std::mutex> lock(m_videoQueueMutex);
+		m_videoQueue.clear();
+		m_videoQueueBytes = 0;
+		m_videoDropUntilKeyframe = false;
+	}
+
+	void runVideoWorker()
+	{
+		while (true)
+		{
+			PendingVideoAccessUnit frame;
+			{
+				std::unique_lock<std::mutex> lock(m_videoQueueMutex);
+				m_videoQueueCv.wait(lock, [this]() {
+					return m_videoWorkerStopping || !m_videoQueue.empty();
+				});
+				if (m_videoWorkerStopping)
+				{
+					return;
+				}
+
+				frame = std::move(m_videoQueue.front());
+				m_videoQueue.pop_front();
+				m_videoQueueBytes -= frame.payload.size();
+			}
+
+			const std::string payload = base64Encode(frame.payload.data(), frame.payload.size());
+			std::ostringstream event;
+			event << "{\"name\":\"video_access_unit\",\"stream_id\":\"" << jsonEscape(frame.streamId)
+				  << "\",\"sample_index\":" << frame.sampleIndex
+				  << ",\"keyframe\":" << (frame.keyframe ? "true" : "false")
+				  << ",\"pts\":" << frame.pts
+				  << ",\"dts\":" << frame.dts
+				  << ",\"duration\":" << frame.duration
+				  << ",\"payloadBase64\":\"" << payload << "\"}";
+			emitJson(event.str());
+			m_videoEmitted.fetch_add(1);
+		}
+	}
+
+	void clearQueuedAudio()
+	{
+		std::lock_guard<std::mutex> lock(m_audioQueueMutex);
+		m_audioQueue.clear();
+	}
+
+	void runAudioWorker()
+	{
+		while (true)
+		{
+			PendingAudioFrame frame;
+			size_t combinedFrames = 1;
+			{
+				std::unique_lock<std::mutex> lock(m_audioQueueMutex);
+				m_audioQueueCv.wait(lock, [this]() {
+					return m_audioWorkerStopping || !m_audioQueue.empty();
+				});
+				if (m_audioWorkerStopping)
+				{
+					return;
+				}
+
+				frame = std::move(m_audioQueue.front());
+				m_audioQueue.pop_front();
+				while (!m_audioQueue.empty() && combinedFrames < kMaxCombinedAudioFrames)
+				{
+					const PendingAudioFrame& next = m_audioQueue.front();
+					if (next.streamId != frame.streamId
+						|| next.sampleRate != frame.sampleRate
+						|| next.channels != frame.channels
+						|| next.bitsPerSample != frame.bitsPerSample
+						|| frame.payload.size() + next.payload.size() > kMaxCombinedAudioBytes)
+					{
+						break;
+					}
+					frame.payload.insert(frame.payload.end(), next.payload.begin(), next.payload.end());
+					m_audioQueue.pop_front();
+					combinedFrames += 1;
+				}
+			}
+
+			const std::string payload = base64Encode(frame.payload.data(), frame.payload.size());
+			std::ostringstream event;
+			event << "{\"name\":\"audio_frame\",\"stream_id\":\"" << jsonEscape(frame.streamId)
+				  << "\",\"pts\":" << frame.pts
+				  << ",\"sample_rate\":" << frame.sampleRate
+				  << ",\"channels\":" << frame.channels
+				  << ",\"bits_per_sample\":" << frame.bitsPerSample
+				  << ",\"payloadBase64\":\"" << payload << "\"}";
+			emitJson(event.str());
+			m_audioEmitted.fetch_add(combinedFrames);
+		}
+	}
+
 	void clearSenderLocked()
 	{
 		m_deviceName.clear();
@@ -953,6 +1398,39 @@ private:
 	bool m_currentPairingTerminal = false;
 	std::vector<std::string> m_trustedDeviceIds;
 	std::vector<std::string> m_blockedDeviceIds;
+	std::mutex m_videoQueueMutex;
+	std::condition_variable m_videoQueueCv;
+	std::deque<PendingVideoAccessUnit> m_videoQueue;
+	size_t m_videoQueueBytes;
+	bool m_videoWorkerStopping;
+	bool m_videoDropUntilKeyframe;
+	std::thread m_videoWorker;
+	std::mutex m_audioQueueMutex;
+	std::condition_variable m_audioQueueCv;
+	std::deque<PendingAudioFrame> m_audioQueue;
+	bool m_audioWorkerStopping;
+	std::thread m_audioWorker;
+	std::atomic<bool> m_sessionActive{false};
+	std::atomic<bool> m_statsWorkerStopping;
+	std::atomic<unsigned long long> m_videoReceived{0};
+	std::atomic<unsigned long long> m_videoEmitted{0};
+	std::atomic<unsigned long long> m_videoDropped{0};
+	std::atomic<unsigned long long> m_videoHeaderKeyFlags{0};
+	std::atomic<unsigned long long> m_videoIdrAccessUnits{0};
+	std::atomic<unsigned long long> m_videoCodecOnlyCallbacks{0};
+	std::atomic<unsigned long long> m_videoHeaderKeyWithoutIdr{0};
+	std::atomic<unsigned long long> m_videoIdrWithoutHeaderKey{0};
+	std::atomic<unsigned long long> m_mirrorPauseEvents{0};
+	std::atomic<unsigned long long> m_mirrorResumeEvents{0};
+	std::atomic<unsigned long long> m_audioReceived{0};
+	std::atomic<unsigned long long> m_audioEmitted{0};
+	std::atomic<unsigned long long> m_audioDropped{0};
+	std::atomic<unsigned long long> m_lastVideoInputTick{0};
+	std::atomic<unsigned long long> m_lastAudioInputTick{0};
+	std::atomic<unsigned long long> m_lastInvalidAudioDiagnosticTick{0};
+	std::atomic<bool> m_mirrorTransportInterrupted{false};
+	std::atomic<bool> m_mirrorSenderPaused{false};
+	std::thread m_statsWorker;
 };
 
 } // namespace

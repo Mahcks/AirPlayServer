@@ -41,6 +41,11 @@ jobs:
       - name: Verify adapter protocol and shutdown
         shell: pwsh
         run: |
+          $featureHeader = Get-Content -Raw -LiteralPath 'AirPlayServerLib/lib/global.h'
+          if ($featureHeader -notmatch '#define\s+GLOBAL_FEATURES\s+0x5A7FFEE6') {
+            throw 'AirPlay capability advertisement must remain mirroring/audio-only.'
+          }
+
           $adapter = Join-Path $env:RUNTIME_DIR 'MirrorSimAdapter.exe'
           if (-not (Test-Path -LiteralPath $adapter)) {
             throw "Expected runtime output '$adapter' was not produced."
@@ -57,8 +62,11 @@ jobs:
             if ($null -eq $ready) {
               throw 'MirrorSimAdapter did not emit receiver_ready.'
             }
-            if ($ready.protocol_version -ne '0.5.0') {
-              throw "Expected adapter protocol 0.5.0, received '$($ready.protocol_version)'."
+            if ($ready.protocol_version -ne '0.6.0') {
+              throw "Expected adapter protocol 0.6.0, received '$($ready.protocol_version)'."
+            }
+            if ($ready.capabilities -notcontains 'pcm-audio') {
+              throw 'MirrorSimAdapter did not advertise the required pcm-audio capability.'
             }
           }
           finally {

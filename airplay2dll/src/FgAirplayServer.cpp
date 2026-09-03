@@ -396,15 +396,14 @@ void FgAirplayServer::audio_set_coverart(void* cls, void* session, const void* b
 void FgAirplayServer::audio_process(void* cls, pcm_data_struct* data, const char* remoteName, const char* remoteDeviceId)
 {
 	FgAirplayServer* pServer = (FgAirplayServer*)cls;
-	if (!pServer)
+	if (!pServer || !data || !data->data || data->data_len <= 0
+		|| data->sample_rate < 8000 || data->sample_rate > 192000
+		|| data->channels == 0 || data->channels > 2
+		|| data->bits_per_sample != 16
+		|| data->data_len % (data->channels * 2) != 0)
 	{
 		return;
 	}
-	if (pServer->m_compressedOnly)
-	{
-		return;
-	}
-
 	// Check if we're shutting down before processing audio
 	if (!pServer->m_pRaop || !pServer->m_pAirplay || !pServer->m_pCallback)
 	{
