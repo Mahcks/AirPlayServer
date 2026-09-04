@@ -21,6 +21,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MirrorSimAdapter", "MirrorS
 		{05D43605-FEB8-4D46-8CA8-A43DFCB53EA3} = {05D43605-FEB8-4D46-8CA8-A43DFCB53EA3}
 	EndProjectSection
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AirPlayLibSmokeTests", "tests\AirPlayLibSmokeTests\AirPlayLibSmokeTests.vcxproj", "{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -69,6 +71,14 @@ Global
 		{8E7C8DB1-6548-4DBD-B402-E92C2B1625E9}.Release|x64.Build.0 = Release|x64
 		{8E7C8DB1-6548-4DBD-B402-E92C2B1625E9}.Release|x86.ActiveCfg = Release|Win32
 		{8E7C8DB1-6548-4DBD-B402-E92C2B1625E9}.Release|x86.Build.0 = Release|Win32
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Debug|x64.ActiveCfg = Debug|x64
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Debug|x64.Build.0 = Debug|x64
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Debug|x86.ActiveCfg = Debug|Win32
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Debug|x86.Build.0 = Debug|Win32
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Release|x64.ActiveCfg = Release|x64
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Release|x64.Build.0 = Release|x64
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Release|x86.ActiveCfg = Release|Win32
+		{C1EADB10-766A-42E0-BA83-A61AD7C1F2B5}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

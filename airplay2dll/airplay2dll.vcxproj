@@ -111,7 +111,6 @@
 xcopy /y /e $(OutDir)$(ProjectName).dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 xcopy /y /e $(OutDir)$(ProjectName).lib $(AirPlayServerDir)lib\$(PlatformTarget)\
 xcopy /y /e $(ExternalDir)ffmpeg\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
-xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -137,7 +136,6 @@ xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)b
 xcopy /y /e $(OutDir)$(ProjectName).dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 xcopy /y /e $(OutDir)$(ProjectName).lib $(AirPlayServerDir)lib\$(PlatformTarget)\
 xcopy /y /e $(ExternalDir)ffmpeg\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
-xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -168,7 +166,6 @@ xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)b
 xcopy /y /e $(OutDir)$(ProjectName).dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 xcopy /y /e $(OutDir)$(ProjectName).lib $(AirPlayServerDir)lib\$(PlatformTarget)\
 xcopy /y /e $(ExternalDir)ffmpeg\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
-xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -198,7 +195,6 @@ xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)b
 xcopy /y /e $(OutDir)$(ProjectName).dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 xcopy /y /e $(OutDir)$(ProjectName).lib $(AirPlayServerDir)lib\$(PlatformTarget)\
 xcopy /y /e $(ExternalDir)ffmpeg\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
-xcopy /y /e $(ExternalDir)plist\lib\$(PlatformTarget)\*.dll $(AirPlayServerDir)bin\$(PlatformTarget)\
 </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>

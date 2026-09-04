@@ -100,7 +100,7 @@ AirPlayServer/
 │   └── CAirServerCallback.cpp
 ├── AirPlayServerLib/        # Core AirPlay 2 protocol (C static lib)
 │   └── lib/                 # RAOP, pairing, crypto, codecs
-├── airplay2dll/             # AirPlay DLL wrapper + FFmpeg H.264 decode
+├── airplay2dll/             # AirPlay DLL wrapper + FFmpeg codec integration
 ├── dnssd/                   # mDNS/Bonjour service discovery DLL
 ├── external/                # Third-party libraries (SDL2, FFmpeg, ImGui)
 └── AirPlay.sln              # Visual Studio solution
@@ -116,7 +116,12 @@ Issues, feature requests, and pull requests are welcome.
 
 ## License
 
-This project inherits licenses from its constituent libraries. Refer to individual library licenses for terms.
+Repository-authored code is provided under the MIT license. The receiver also
+uses OSI-approved third-party components, including dynamically linked FFmpeg
+under LGPL-2.1-or-later, libplist under LGPL-2.1-or-later, and PlayFair
+interoperability code under GPL-3.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+for component scope, exact FFmpeg build provenance, source availability, and
+license locations.
 
 ## Acknowledgments
 

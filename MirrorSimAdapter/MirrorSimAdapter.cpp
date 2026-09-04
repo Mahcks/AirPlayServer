@@ -1193,8 +1193,7 @@ public:
 	{
 		const std::string message = msg ? msg : "native receiver error";
 		handlePairingLog(message);
-		const bool audioDecodeFailure = containsInsensitive(message, "aacdecoder_fill error")
-			|| containsInsensitive(message, "aacdecoder_decodeframe error");
+		const bool audioDecodeFailure = containsInsensitive(message, "ffmpeg aac decode error");
 		if (audioDecodeFailure)
 		{
 			m_audioDropped.fetch_add(1);
