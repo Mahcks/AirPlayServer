@@ -651,6 +651,14 @@ public:
 		emitJson(event.str());
 	}
 
+	virtual bool requestPinApproval(const char* remoteAddress, const char* pin) override
+	{
+		// Headless sessions use pairing approval, not an on-screen PIN.
+		(void)remoteAddress;
+		(void)pin;
+		return false;
+	}
+
 	virtual bool approvePairingRequest(
 		const char* remoteName,
 		const char* remoteDeviceId,

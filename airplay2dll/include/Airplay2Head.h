@@ -37,16 +37,27 @@ public:
 		const char* remoteSourceVersion,
 		const char* pairingFingerprint) = 0;
 
+	// Runs on the receiver network thread and waits for the app's allow/deny UI.
+	virtual bool requestPinApproval(const char* remoteAddress, const char* pin) = 0;
+
 	virtual void log(int level, const char* msg) = 0;
 };
 
 AIRPLAYSERVER_API void* fgServerStart(const char serverName[AIRPLAY_NAME_LEN], 
 	unsigned int raopPort, unsigned int airplayPort,
-	IAirServerCallback* callback);
+	IAirServerCallback* callback, const char* password);
+AIRPLAYSERVER_API void* fgServerStartWithDisplay(const char serverName[AIRPLAY_NAME_LEN],
+	unsigned int raopPort, unsigned int airplayPort,
+	IAirServerCallback* callback, const char* password,
+	unsigned int displayWidth, unsigned int displayHeight);
 AIRPLAYSERVER_API void* fgServerStartHeadless(const char serverName[AIRPLAY_NAME_LEN],
 	unsigned int raopPort, unsigned int airplayPort,
 	IAirServerCallback* callback);
 AIRPLAYSERVER_API void fgServerStop(void* handle);
 AIRPLAYSERVER_API int fgServerGetPorts(void* handle, unsigned short* raopPort, unsigned short* airplayPort);
+// Withdraws (0) or restores (1) the Bonjour advertisement of a running server.
+AIRPLAYSERVER_API void fgServerSetAdvertising(void* handle, int enabled);
+// Ends the active sender's session; the sender sees the receiver disconnect.
+AIRPLAYSERVER_API void fgServerDisconnect(void* handle);
 
 AIRPLAYSERVER_API float fgServerScale(void* handle, float fRatio);

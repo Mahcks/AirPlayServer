@@ -29,26 +29,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -201,6 +201,7 @@
     <ClInclude Include="lib\mirror_buffer.h" />
     <ClInclude Include="lib\netutils.h" />
     <ClInclude Include="lib\pairing.h" />
+	<ClInclude Include="lib\pinpair.h" />
     <ClInclude Include="lib\playfair\omg_hax.h" />
     <ClInclude Include="lib\playfair\playfair.h" />
     <ClInclude Include="lib\plist.h" />
@@ -251,6 +252,7 @@
     <ClCompile Include="lib\mirror_buffer.c" />
     <ClCompile Include="lib\netutils.c" />
     <ClCompile Include="lib\pairing.c" />
+	<ClCompile Include="lib\pinpair.c" />
     <ClCompile Include="lib\playfair\hand_garble.c" />
     <ClCompile Include="lib\playfair\modified_md5.c" />
     <ClCompile Include="lib\playfair\omg_hax.c" />

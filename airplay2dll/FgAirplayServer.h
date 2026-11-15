@@ -19,15 +19,20 @@ public:
 
 	int start(const char serverName[AIRPLAY_NAME_LEN], 
 		unsigned int raopPort, unsigned int airplayPort,
-		IAirServerCallback* callback, bool compressedOnly = false);
+		IAirServerCallback* callback, const char* password,
+		unsigned int displayWidth, unsigned int displayHeight, bool compressedOnly = false);
 	void stop();
 	unsigned short raopPort() const { return m_raopPort; }
 	unsigned short airplayPort() const { return m_airplayPort; }
 	float setScale(float fRatio);
+	// Withdraws or restores the Bonjour advertisement without stopping the
+	// receiver, so others stop seeing it while a device is streaming.
+	void setAdvertising(bool enabled);
+	// Ends the active sender's session.
+	void disconnect();
 
 protected:
-	unsigned short m_raopPort = 0;
-	unsigned short m_airplayPort = 0;
+	int registerServices();
 	void clearChannels();
 	FgAirplayChannel* getChannel(const char* remoteDeviceId);
 
@@ -42,6 +47,7 @@ protected:
 	static void audio_flush(void* cls, void* session, const char* remoteName, const char* remoteDeviceId);
 	static void audio_destroy(void* cls, void* session, const char* remoteName, const char* remoteDeviceId);
 	static void video_process(void* cls, h264_decode_struct* data, const char* remoteName, const char* remoteDeviceId);
+	static int pin_request(void* cls, const char* remoteAddress, const char* pin);
 	static void video_report_geometry(void* cls, float sourceWidth, float sourceHeight,
 		float outputWidth, float outputHeight,
 		const char* remoteName, const char* remoteDeviceId);
@@ -79,5 +85,12 @@ protected:
 	float					m_fScaleRatio;
 	bool					m_compressedOnly;
 	FgAirplayChannelMap		m_mapChannel;
-};
 
+	// Bonjour registration details, kept to re-advertise after a session.
+	std::string				m_serviceName;
+	unsigned short			m_raopPort;
+	unsigned short			m_airplayPort;
+	char					m_hwaddr[6];
+	bool					m_pinRequired;
+	bool					m_advertising;
+};

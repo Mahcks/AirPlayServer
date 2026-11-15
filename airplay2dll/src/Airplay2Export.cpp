@@ -3,10 +3,20 @@
 
 void* fgServerStart(const char serverName[AIRPLAY_NAME_LEN], 
 	unsigned int raopPort, unsigned int airplayPort,
-	IAirServerCallback* callback) 
+	IAirServerCallback* callback, const char* password)
+{
+	return fgServerStartWithDisplay(serverName, raopPort, airplayPort,
+		callback, password, 1920, 1080);
+}
+
+void* fgServerStartWithDisplay(const char serverName[AIRPLAY_NAME_LEN],
+	unsigned int raopPort, unsigned int airplayPort,
+	IAirServerCallback* callback, const char* password,
+	unsigned int displayWidth, unsigned int displayHeight)
 {
 	FgAirplayServer* pServer = new FgAirplayServer();
-	if (pServer->start(serverName, raopPort, airplayPort, callback, false) != 0) {
+	if (pServer->start(serverName, raopPort, airplayPort, callback, password,
+		displayWidth, displayHeight) != 0) {
 		delete pServer;
 		return NULL;
 	}
@@ -18,7 +28,7 @@ void* fgServerStartHeadless(const char serverName[AIRPLAY_NAME_LEN],
 	IAirServerCallback* callback)
 {
 	FgAirplayServer* pServer = new FgAirplayServer();
-	if (pServer->start(serverName, raopPort, airplayPort, callback, true) != 0) {
+	if (pServer->start(serverName, raopPort, airplayPort, callback, NULL, 1920, 1080, true) != 0) {
 		delete pServer;
 		return NULL;
 	}
@@ -42,6 +52,20 @@ void fgServerStop(void* handle)
 
 		delete pServer;
 		pServer = NULL;
+	}
+}
+
+void fgServerSetAdvertising(void* handle, int enabled)
+{
+	if (handle != NULL) {
+		((FgAirplayServer*)handle)->setAdvertising(enabled != 0);
+	}
+}
+
+void fgServerDisconnect(void* handle)
+{
+	if (handle != NULL) {
+		((FgAirplayServer*)handle)->disconnect();
 	}
 }
 

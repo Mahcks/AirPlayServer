@@ -1,20 +1,23 @@
 ﻿#include "pch.h"
 #include "FgAirplayServer.h"
 #include "Airplay2Head.h"
+#include <limits>
 #include <array>
 #include <bcrypt.h>
 #include <cstdlib>
 #include <fstream>
 #include <thread>
+#include <vector>
 #include "CAutoLock.h"
 
-#ifdef WIN32
-#include   "iphlpapi.h"  
-#pragma   comment(lib,   "iphlpapi.lib   ")  
+#ifdef _WIN32
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "bcrypt.lib")
 #endif
 
-BOOL GetMacAddress(char strMac[6]);
+static BOOL GetPrimaryMacAddress(char strMac[6]);
 
 namespace {
 
@@ -131,6 +134,11 @@ FgAirplayServer::FgAirplayServer()
 	, m_pRaop(NULL)
 	, m_fScaleRatio(1.0f)
 	, m_compressedOnly(false)
+	, m_raopPort(0)
+	, m_airplayPort(0)
+	, m_hwaddr()
+	, m_pinRequired(false)
+	, m_advertising(false)
 {
 	memset(&m_stAirplayCB, 0, sizeof(airplay_callbacks_t));
 	memset(&m_stRaopCB, 0, sizeof(raop_callbacks_t));
@@ -143,6 +151,7 @@ FgAirplayServer::FgAirplayServer()
 // 	m_stAirplayCB.audio_destroy = audio_destroy;
 	m_stAirplayCB.video_play = ap_video_play;
 	m_stAirplayCB.video_get_play_info = ap_video_get_play_info;
+	m_stAirplayCB.pin_request = pin_request;
 
 	m_stRaopCB.connected = connected;
 	m_stRaopCB.disconnected = disconnected;
@@ -155,6 +164,7 @@ FgAirplayServer::FgAirplayServer()
 	m_stRaopCB.pairing_request = pairing_request;
 	// m_stRaopCB.audio_destroy = audio_destroy;
 	m_stRaopCB.video_process = video_process;
+	m_stRaopCB.pin_request = pin_request;
 	m_stRaopCB.video_report_geometry = video_report_geometry;
 	m_stRaopCB.video_set_sender_paused = video_set_sender_paused;
 
@@ -172,9 +182,11 @@ FgAirplayServer::~FgAirplayServer()
 
 int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN], 
 	unsigned int raopPort, unsigned int airplayPort,
-	IAirServerCallback* callback, bool compressedOnly)
+	IAirServerCallback* callback, const char* password,
+	unsigned int displayWidth, unsigned int displayHeight, bool compressedOnly)
 {
 	m_pCallback = callback;
+	const char* authPassword = (password != NULL && password[0] != '\0') ? password : NULL;
 	m_compressedOnly = compressedOnly;
 
 	unsigned short raop_port = raopPort;
@@ -190,7 +202,7 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 
 		if (!loadConfiguredHardwareAddress(hwaddr))
 		{
-			GetMacAddress(hwaddr);
+			GetPrimaryMacAddress(hwaddr);
 		}
 
 		m_pAirplay = hasPersistentPairingSeed
@@ -200,7 +212,7 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 			ret = -1;
 			break;
 		}
-		ret = airplay_start(m_pAirplay, &airplay_port, hwaddr, sizeof(hwaddr), NULL);
+		ret = airplay_start(m_pAirplay, &airplay_port, hwaddr, sizeof(hwaddr), authPassword);
 		if (ret != 1) {
 			ret = -1;
 			break;
@@ -218,6 +230,8 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 
 		raop_set_log_level(m_pRaop, RAOP_LOG_DEBUG);
 		raop_set_log_callback(m_pRaop, &log_callback, this);
+		raop_set_password(m_pRaop, authPassword);
+		raop_set_display_size(m_pRaop, displayWidth, displayHeight);
 		ret = raop_start(m_pRaop, &raop_port);
 		if (ret != 1) {
 			ret = -1;
@@ -235,11 +249,10 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 				ret = -1;
 				break;
 			}
-			ret = dnssd_register_raop(m_pDnsSd, serverName, raop_port, hwaddr, sizeof(hwaddr), 0);
-			if (ret < 0) {
-				break;
-			}
-			ret = dnssd_register_airplay(m_pDnsSd, serverName, airplay_port, hwaddr, sizeof(hwaddr));
+			m_serviceName = serverName;
+			memcpy(m_hwaddr, hwaddr, sizeof(m_hwaddr));
+			m_pinRequired = authPassword != NULL;
+			ret = registerServices();
 			if (ret < 0) {
 				break;
 			}
@@ -257,6 +270,39 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 	}
 
 	return ret;
+}
+
+int FgAirplayServer::registerServices()
+{
+	int ret = dnssd_register_raop(m_pDnsSd, m_serviceName.c_str(), m_raopPort,
+		m_hwaddr, sizeof(m_hwaddr), m_pinRequired ? 1 : 0);
+	if (ret >= 0) {
+		ret = dnssd_register_airplay(m_pDnsSd, m_serviceName.c_str(), m_airplayPort,
+			m_hwaddr, sizeof(m_hwaddr), m_pinRequired ? 1 : 0);
+	}
+	m_advertising = ret >= 0;
+	return ret;
+}
+
+void FgAirplayServer::setAdvertising(bool enabled)
+{
+	if (m_pDnsSd == NULL || m_advertising == enabled) {
+		return;
+	}
+	if (enabled) {
+		registerServices();
+	} else {
+		dnssd_unregister_airplay(m_pDnsSd);
+		dnssd_unregister_raop(m_pDnsSd);
+		m_advertising = false;
+	}
+}
+
+void FgAirplayServer::disconnect()
+{
+	if (m_pRaop != NULL) {
+		raop_disconnect_session(m_pRaop);
+	}
 }
 
 void FgAirplayServer::stop()
@@ -622,6 +668,15 @@ void FgAirplayServer::ap_video_get_play_info(void* cls, double* duration, double
 	}
 }
 
+int FgAirplayServer::pin_request(void* cls, const char* remoteAddress, const char* pin)
+{
+	FgAirplayServer* pServer = (FgAirplayServer*)cls;
+	if (pServer == NULL || pServer->m_pCallback == NULL) {
+		return 0;
+	}
+	return pServer->m_pCallback->requestPinApproval(remoteAddress, pin) ? 1 : 0;
+}
+
 void FgAirplayServer::log_callback(void* cls, int level, const char* msg)
 {
 	FgAirplayServer* pServer = (FgAirplayServer*)cls;
@@ -635,41 +690,162 @@ void FgAirplayServer::log_callback(void* cls, int level, const char* msg)
 	}
 }
 
-BOOL GetMacAddress(char strMac[6])
+static bool IsUsableUnicastAddress(const IP_ADAPTER_UNICAST_ADDRESS* address)
 {
-	PIP_ADAPTER_INFO pAdapterInfo;
-	DWORD AdapterInfoSize;
-	DWORD Err;
-	AdapterInfoSize = 0;
-	Err = GetAdaptersInfo(NULL, &AdapterInfoSize);
-	if ((Err != 0) && (Err != ERROR_BUFFER_OVERFLOW)) {
-		printf("���������Ϣʧ��!");
-		return   FALSE;
+	if (address == NULL || address->Address.lpSockaddr == NULL) {
+		return false;
 	}
-	//   ����������Ϣ�ڴ�  
-	pAdapterInfo = (PIP_ADAPTER_INFO)GlobalAlloc(GPTR, AdapterInfoSize);
-	if (pAdapterInfo == NULL) {
-		printf("����������Ϣ�ڴ�ʧ��");
-		return   FALSE;
+	if (address->DadState != IpDadStatePreferred &&
+		address->DadState != IpDadStateDeprecated) {
+		return false;
 	}
-	if (GetAdaptersInfo(pAdapterInfo, &AdapterInfoSize) != 0) {
-		printf("���������Ϣʧ��!\n");
-		GlobalFree(pAdapterInfo);
-		return   FALSE;
-	}
-	for (int i = 0; i < 6; i++)
-	{
-		strMac[i] = pAdapterInfo->Address[i];
-	}
-// 	strMac[0] = pAdapterInfo->Address[0];
-// 	sprintf_s(strMac, 7, "%02X%02X%02X%02X%02X%02X",
-// 		pAdapterInfo->Address[0],
-// 		pAdapterInfo->Address[1],
-// 		pAdapterInfo->Address[2],
-// 		pAdapterInfo->Address[3],
-// 		pAdapterInfo->Address[4],
-// 		pAdapterInfo->Address[5]);
 
-	GlobalFree(pAdapterInfo);
-	return   TRUE;
+	if (address->Address.lpSockaddr->sa_family == AF_INET) {
+		const sockaddr_in* ipv4 =
+			reinterpret_cast<const sockaddr_in*>(address->Address.lpSockaddr);
+		return ipv4->sin_addr.s_addr != INADDR_ANY &&
+			ipv4->sin_addr.s_addr != INADDR_BROADCAST;
+	}
+
+	if (address->Address.lpSockaddr->sa_family == AF_INET6) {
+		const sockaddr_in6* ipv6 =
+			reinterpret_cast<const sockaddr_in6*>(address->Address.lpSockaddr);
+		return !IN6_IS_ADDR_UNSPECIFIED(&ipv6->sin6_addr) &&
+			!IN6_IS_ADDR_MULTICAST(&ipv6->sin6_addr);
+	}
+
+	return false;
+}
+
+static bool GetUsableAddressFamilies(const IP_ADAPTER_ADDRESSES* adapter,
+	bool* hasIpv4, bool* hasIpv6)
+{
+	*hasIpv4 = false;
+	*hasIpv6 = false;
+
+	for (const IP_ADAPTER_UNICAST_ADDRESS* address = adapter->FirstUnicastAddress;
+		address != NULL; address = address->Next) {
+		if (!IsUsableUnicastAddress(address)) {
+			continue;
+		}
+
+		if (address->Address.lpSockaddr->sa_family == AF_INET) {
+			*hasIpv4 = true;
+		}
+		else if (address->Address.lpSockaddr->sa_family == AF_INET6) {
+			*hasIpv6 = true;
+		}
+	}
+
+	return *hasIpv4 || *hasIpv6;
+}
+
+static bool HasUsableGateway(const IP_ADAPTER_ADDRESSES* adapter)
+{
+	for (const IP_ADAPTER_GATEWAY_ADDRESS_LH* gateway = adapter->FirstGatewayAddress;
+		gateway != NULL; gateway = gateway->Next) {
+		if (gateway->Address.lpSockaddr == NULL) {
+			continue;
+		}
+
+		if (gateway->Address.lpSockaddr->sa_family == AF_INET) {
+			const sockaddr_in* ipv4 =
+				reinterpret_cast<const sockaddr_in*>(gateway->Address.lpSockaddr);
+			if (ipv4->sin_addr.s_addr != INADDR_ANY) {
+				return true;
+			}
+		}
+		else if (gateway->Address.lpSockaddr->sa_family == AF_INET6) {
+			const sockaddr_in6* ipv6 =
+				reinterpret_cast<const sockaddr_in6*>(gateway->Address.lpSockaddr);
+			if (!IN6_IS_ADDR_UNSPECIFIED(&ipv6->sin6_addr)) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static ULONG GetAdapterMetric(const IP_ADAPTER_ADDRESSES* adapter,
+	bool hasIpv4, bool hasIpv6)
+{
+	ULONG metric = (std::numeric_limits<ULONG>::max)();
+	if (hasIpv4) {
+		metric = adapter->Ipv4Metric;
+	}
+	if (hasIpv6 && adapter->Ipv6Metric < metric) {
+		metric = adapter->Ipv6Metric;
+	}
+	return metric;
+}
+
+static BOOL GetPrimaryMacAddress(char strMac[6])
+{
+	const ULONG flags = GAA_FLAG_INCLUDE_GATEWAYS |
+		GAA_FLAG_SKIP_ANYCAST |
+		GAA_FLAG_SKIP_MULTICAST |
+		GAA_FLAG_SKIP_DNS_SERVER;
+	ULONG bufferSize = 15 * 1024;
+	std::vector<unsigned char> buffer(bufferSize);
+	DWORD result = ERROR_BUFFER_OVERFLOW;
+
+	for (int attempt = 0; attempt < 3 && result == ERROR_BUFFER_OVERFLOW; ++attempt) {
+		buffer.resize(bufferSize);
+		result = GetAdaptersAddresses(AF_UNSPEC, flags, NULL,
+			reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &bufferSize);
+	}
+	if (result != NO_ERROR) {
+		return FALSE;
+	}
+
+	const IP_ADAPTER_ADDRESSES* bestAdapter = NULL;
+	bool bestHasGateway = false;
+	ULONG bestMetric = (std::numeric_limits<ULONG>::max)();
+
+	for (const IP_ADAPTER_ADDRESSES* adapter =
+		reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(buffer.data());
+		adapter != NULL; adapter = adapter->Next) {
+		if (adapter->OperStatus != IfOperStatusUp ||
+			(adapter->Flags & IP_ADAPTER_NO_MULTICAST) != 0 ||
+			adapter->PhysicalAddressLength != 6 ||
+			adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+			adapter->IfType == IF_TYPE_TUNNEL) {
+			continue;
+		}
+
+		bool hasNonZeroMac = false;
+		for (ULONG i = 0; i < adapter->PhysicalAddressLength; ++i) {
+			if (adapter->PhysicalAddress[i] != 0) {
+				hasNonZeroMac = true;
+				break;
+			}
+		}
+		if (!hasNonZeroMac) {
+			continue;
+		}
+
+		bool hasIpv4;
+		bool hasIpv6;
+		if (!GetUsableAddressFamilies(adapter, &hasIpv4, &hasIpv6)) {
+			continue;
+		}
+
+		const bool hasGateway = HasUsableGateway(adapter);
+		const ULONG metric = GetAdapterMetric(adapter, hasIpv4, hasIpv6);
+		if (bestAdapter == NULL ||
+			(hasGateway && !bestHasGateway) ||
+			(hasGateway == bestHasGateway && metric < bestMetric)) {
+			bestAdapter = adapter;
+			bestHasGateway = hasGateway;
+			bestMetric = metric;
+		}
+	}
+
+	if (bestAdapter == NULL) {
+		return FALSE;
+	}
+
+	memcpy(strMac, bestAdapter->PhysicalAddress, 6);
+	return TRUE;
 }

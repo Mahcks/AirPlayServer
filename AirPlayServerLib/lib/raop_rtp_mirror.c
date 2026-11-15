@@ -20,6 +20,7 @@
 
 #ifdef WIN32
 #include <WinSock2.h>
+#include <mstcpip.h>
 #include <time.h>
 #include <windows.h>
 typedef SOCKET mirror_stream_socket_t;
@@ -34,23 +35,6 @@ typedef int mirror_stream_socket_t;
 #define MIRROR_TIMING_RESPONSE_TIMEOUT_MS 300
 #define MIRROR_TIMING_PROBE_INTERVAL_SECONDS 3
 #define MIRROR_TIMING_TIMEOUT_REPORT_INTERVAL 10
-
-static int
-recv_exact(mirror_stream_socket_t socket_fd, unsigned char *buffer, int length)
-{
-    int read_total = 0;
-
-    while (read_total < length) {
-        int ret = recv(socket_fd, (char *)buffer + read_total, length - read_total, 0);
-        if (ret <= 0) {
-            return -1;
-        }
-
-        read_total += ret;
-    }
-
-    return read_total;
-}
 
 static uint64_t
 mirror_now_ms(void)
@@ -93,6 +77,7 @@ struct raop_rtp_mirror_s {
     /* These variables only edited mutex locked */
     int running;
     int joined;
+    int stop_in_progress;
 
     int flush;
     thread_handle_t thread_mirror;
@@ -110,6 +95,78 @@ struct raop_rtp_mirror_s {
     unsigned short mirror_timing_rport;
     unsigned short mirror_timing_lport;
 };
+
+/* Read one complete protocol field without allowing a half-delivered TCP frame
+ * to block the mirror thread forever. Network-path changes (notably enabling a
+ * VPN on the sender) can leave an established socket with no more bytes. */
+static int
+mirror_recv_exact(raop_rtp_mirror_t *mirror, mirror_stream_socket_t socket_fd,
+    unsigned char *buffer, int length)
+{
+    int offset = 0;
+
+    if (mirror == NULL || socket_fd == -1 || buffer == NULL || length < 0) {
+        return -1;
+    }
+    while (offset < length) {
+        fd_set rfds;
+        struct timeval timeout;
+        int ready;
+        int received;
+        int running;
+
+        MUTEX_LOCK(mirror->run_mutex);
+        running = mirror->running;
+        MUTEX_UNLOCK(mirror->run_mutex);
+        if (!running) {
+            return -1;
+        }
+
+        FD_ZERO(&rfds);
+        FD_SET(socket_fd, &rfds);
+        timeout.tv_sec = MIRROR_STREAM_RECEIVE_TIMEOUT_MS / 1000;
+        timeout.tv_usec = (MIRROR_STREAM_RECEIVE_TIMEOUT_MS % 1000) * 1000;
+        ready = select((int)(socket_fd + 1), &rfds, NULL, NULL, &timeout);
+        if (ready == 0) {
+            logger_log(mirror->logger, LOGGER_WARNING,
+                "Mirror TCP read timed out after %d ms", MIRROR_STREAM_RECEIVE_TIMEOUT_MS);
+            return -1;
+        }
+        if (ready < 0) {
+            logger_log(mirror->logger, LOGGER_WARNING,
+                "Mirror TCP select failed");
+            return -1;
+        }
+
+        received = recv(socket_fd, (char *)buffer + offset, length - offset, 0);
+        if (received <= 0) {
+            logger_log(mirror->logger, LOGGER_INFO,
+                received == 0 ? "Mirror TCP socket closed" : "Mirror TCP receive failed");
+            return -1;
+        }
+        offset += received;
+    }
+    return 0;
+}
+
+static void
+mirror_enable_keepalive(mirror_stream_socket_t socket_fd)
+{
+    int enabled = 1;
+    setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE,
+        (const char *)&enabled, sizeof(enabled));
+#ifdef WIN32
+    {
+        struct tcp_keepalive settings;
+        DWORD bytes_returned = 0;
+        settings.onoff = 1;
+        settings.keepalivetime = 5000;
+        settings.keepaliveinterval = 1000;
+        WSAIoctl((SOCKET)socket_fd, SIO_KEEPALIVE_VALS,
+            &settings, sizeof(settings), NULL, 0, &bytes_returned, NULL, NULL);
+    }
+#endif
+}
 
 static int
 raop_rtp_parse_remote(raop_rtp_mirror_t *raop_rtp_mirror, const unsigned char *remote, int remotelen)
@@ -176,6 +233,7 @@ raop_rtp_mirror_t *raop_rtp_mirror_init(logger_t *logger, raop_callbacks_t *call
 
     raop_rtp_mirror->running = 0;
     raop_rtp_mirror->joined = 1;
+    raop_rtp_mirror->stop_in_progress = 0;
     raop_rtp_mirror->flush = NO_FLUSH;
 
     MUTEX_CREATE(raop_rtp_mirror->run_mutex);
@@ -357,9 +415,8 @@ raop_rtp_mirror_thread(void *arg)
             nfds = raop_rtp_mirror->mirror_data_sock+1;
         } else {
             FD_SET(stream_fd, &rfds);
-#ifndef WIN32
-            nfds = stream_fd+1;
-#endif
+            /* Winsock ignores nfds, but it must not be read uninitialized. */
+            nfds = (int)stream_fd+1;
         }
         ret = select(nfds, &rfds, NULL, NULL, &tv);
         if (ret == 0) {
@@ -387,15 +444,14 @@ raop_rtp_mirror_thread(void *arg)
 #ifdef WIN32
             {
                 DWORD receive_timeout = MIRROR_STREAM_RECEIVE_TIMEOUT_MS;
-                BOOL keepalive = TRUE;
                 setsockopt(stream_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&receive_timeout, sizeof(receive_timeout));
-                setsockopt(stream_fd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keepalive, sizeof(keepalive));
             }
 #endif
             data_connection_generation++;
             logger_log(raop_rtp_mirror->logger, LOGGER_INFO,
                        "Mirror data client connected (generation=%u)", data_connection_generation);
             reconnect_deadline_ms = 0;
+            mirror_enable_keepalive(stream_fd);
         }
         if (stream_fd != -1 && FD_ISSET(stream_fd, &rfds)) {
             // packetlen initially 0
@@ -435,7 +491,7 @@ raop_rtp_mirror_thread(void *arg)
             } else {
                 // normal data block
                 // read remaining 124 bytes
-                if (recv_exact(stream_fd, packet + readstart, 128 - readstart) < 0) {
+                if (mirror_recv_exact(raop_rtp_mirror, stream_fd, packet + readstart, 128 - readstart) < 0) {
                     logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Mirror packet header was interrupted; awaiting reconnect");
                     closesocket(stream_fd);
                     stream_fd = -1;
@@ -487,7 +543,7 @@ raop_rtp_mirror_thread(void *arg)
                         exceptionExit = 1;
                         break;
                     }
-                    if (recv_exact(stream_fd, payload_in, payloadsize) < 0) {
+                    if (mirror_recv_exact(raop_rtp_mirror, stream_fd, payload_in, payloadsize) < 0) {
                         free(payload_in);
                         free(payload);
                         logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Encrypted mirror payload was interrupted; awaiting reconnect");
@@ -605,7 +661,7 @@ raop_rtp_mirror_thread(void *arg)
                         exceptionExit = 1;
                         break;
                     }
-                    if (recv_exact(stream_fd, payload, payloadsize) < 0) {
+                    if (mirror_recv_exact(raop_rtp_mirror, stream_fd, payload, payloadsize) < 0) {
                         free(payload);
                         logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Mirror codec payload was interrupted; awaiting reconnect");
                         closesocket(stream_fd);
@@ -714,7 +770,7 @@ raop_rtp_mirror_thread(void *arg)
                 } else if (payloadtype == (short) 2) {
                     if (payloadsize > 0) {
                         unsigned char* payload_in = malloc(payloadsize);
-                        if (!payload_in || recv_exact(stream_fd, payload_in, payloadsize) < 0) {
+                        if (!payload_in || mirror_recv_exact(raop_rtp_mirror, stream_fd, payload_in, payloadsize) < 0) {
                             free(payload_in);
                             logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Mirror control payload was interrupted; awaiting reconnect");
                             closesocket(stream_fd);
@@ -731,7 +787,7 @@ raop_rtp_mirror_thread(void *arg)
                 } else if (payloadtype == (short) 4) {
                     if (payloadsize > 0) {
                         unsigned char* payload_in = malloc(payloadsize);
-                        if (!payload_in || recv_exact(stream_fd, payload_in, payloadsize) < 0) {
+                        if (!payload_in || mirror_recv_exact(raop_rtp_mirror, stream_fd, payload_in, payloadsize) < 0) {
                             free(payload_in);
                             logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Mirror control payload was interrupted; awaiting reconnect");
                             closesocket(stream_fd);
@@ -748,7 +804,7 @@ raop_rtp_mirror_thread(void *arg)
                 } else {
                     if (payloadsize > 0) {
                         unsigned char* payload_in = malloc(payloadsize);
-                        if (!payload_in || recv_exact(stream_fd, payload_in, payloadsize) < 0) {
+                        if (!payload_in || mirror_recv_exact(raop_rtp_mirror, stream_fd, payload_in, payloadsize) < 0) {
                             free(payload_in);
                             logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Unknown mirror payload was interrupted; awaiting reconnect");
                             closesocket(stream_fd);
@@ -800,7 +856,7 @@ raop_rtp_start_mirror(raop_rtp_mirror_t *raop_rtp_mirror, int use_udp, unsigned 
     assert(raop_rtp_mirror);
 
     MUTEX_LOCK(raop_rtp_mirror->run_mutex);
-    if (raop_rtp_mirror->running || !raop_rtp_mirror->joined) {
+    if (raop_rtp_mirror->running || !raop_rtp_mirror->joined || raop_rtp_mirror->stop_in_progress) {
         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
         return;
     }
@@ -822,41 +878,48 @@ raop_rtp_start_mirror(raop_rtp_mirror_t *raop_rtp_mirror, int use_udp, unsigned 
     raop_rtp_mirror->running = 1;
     raop_rtp_mirror->joined = 0;
 
-    if (raop_rtp_mirror->callbacks.connected != NULL) {
-        raop_rtp_mirror->callbacks.connected(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->remoteName, raop_rtp_mirror->remoteDeviceId);
-    }
-
     THREAD_CREATE(raop_rtp_mirror->thread_mirror, raop_rtp_mirror_thread, raop_rtp_mirror);
     THREAD_CREATE(raop_rtp_mirror->thread_time, raop_rtp_mirror_thread_time, raop_rtp_mirror);
     MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
+
+    if (raop_rtp_mirror->callbacks.connected != NULL) {
+        raop_rtp_mirror->callbacks.connected(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->remoteName, raop_rtp_mirror->remoteDeviceId);
+    }
 }
 
 void raop_rtp_mirror_stop(raop_rtp_mirror_t *raop_rtp_mirror) {
+    int mirror_data_sock;
+    int mirror_time_sock;
+
+    /* A stream-specific TEARDOWN may reference a stream that this control
+     * connection never initialized. Treat that as an idempotent stop. */
+    if (!raop_rtp_mirror) {
+        return;
+    }
     assert(raop_rtp_mirror);
     logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Stopping raop rtp mirror");
 
-    /* Check that we are running and thread is not
-     * joined (should never be while still running) */
+    /* A TCP close and RTSP TEARDOWN can race. Only one caller may close and
+     * join the worker threads; duplicate and re-entrant stops return. */
     MUTEX_LOCK(raop_rtp_mirror->run_mutex);
-    if (!raop_rtp_mirror->running || raop_rtp_mirror->joined) {
+    if (raop_rtp_mirror->joined || raop_rtp_mirror->stop_in_progress) {
         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
-        logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Raop rtp mirror stopped[1]");
         return;
     }
+    raop_rtp_mirror->stop_in_progress = 1;
     raop_rtp_mirror->running = 0;
+    mirror_data_sock = raop_rtp_mirror->mirror_data_sock;
+    mirror_time_sock = raop_rtp_mirror->mirror_time_sock;
     MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 
-    if (raop_rtp_mirror->mirror_data_sock != -1) {
-        closesocket(raop_rtp_mirror->mirror_data_sock);
-        raop_rtp_mirror->mirror_data_sock = -1;
+    /* Keep the shared descriptors valid until the workers have left FD_SET,
+     * but close local snapshots to wake any pending socket operation. */
+    if (mirror_data_sock != -1) {
+        closesocket(mirror_data_sock);
     }
-    if (raop_rtp_mirror->mirror_time_sock != -1) {
-        closesocket(raop_rtp_mirror->mirror_time_sock);
-        raop_rtp_mirror->mirror_time_sock = -1;
+    if (mirror_time_sock != -1) {
+        closesocket(mirror_time_sock);
     }
-    /* Join the thread */
-    logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Join mirror thread");
-    THREAD_JOIN(raop_rtp_mirror->thread_mirror);
 
 #ifndef WIN32
     MUTEX_LOCK(raop_rtp_mirror->time_mutex);
@@ -866,34 +929,54 @@ void raop_rtp_mirror_stop(raop_rtp_mirror_t *raop_rtp_mirror) {
     MUTEX_UNLOCK(raop_rtp_mirror->time_mutex);
 #endif // !WIN32
 
+    logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Join mirror thread");
+    THREAD_JOIN(raop_rtp_mirror->thread_mirror);
+
     logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Join mirror time thread");
     THREAD_JOIN(raop_rtp_mirror->thread_time);
-
-    /* Mark thread as joined */
-    MUTEX_LOCK(raop_rtp_mirror->run_mutex);
-    raop_rtp_mirror->joined = 1;
-    MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 
     if (raop_rtp_mirror->callbacks.disconnected != NULL) {
         raop_rtp_mirror->callbacks.disconnected(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->remoteName, raop_rtp_mirror->remoteDeviceId);
     }
     logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Raop rtp mirror stopped");
+
+    /* Publish completion only after callbacks and logging finish. Destroy waits
+     * for this state before releasing the object. */
+    MUTEX_LOCK(raop_rtp_mirror->run_mutex);
+    raop_rtp_mirror->mirror_data_sock = -1;
+    raop_rtp_mirror->mirror_time_sock = -1;
+    raop_rtp_mirror->joined = 1;
+    raop_rtp_mirror->stop_in_progress = 0;
+    MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 }
 
 void raop_rtp_mirror_destroy(raop_rtp_mirror_t *raop_rtp_mirror) {
     if (raop_rtp_mirror) {
+        int stop_complete = 0;
+
         raop_rtp_mirror_stop(raop_rtp_mirror);
-        MUTEX_DESTROY(raop_rtp_mirror->run_mutex);
-        MUTEX_DESTROY(raop_rtp_mirror->time_mutex);
-        COND_DESTROY(raop_rtp_mirror->time_cond);
-        mirror_buffer_destroy(raop_rtp_mirror->buffer);
+
+        /* stop() deliberately returns for a duplicate caller. Destruction must
+         * wait for the owner to finish using the object. */
+        while (!stop_complete) {
+            MUTEX_LOCK(raop_rtp_mirror->run_mutex);
+            stop_complete = raop_rtp_mirror->joined;
+            MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
+            if (!stop_complete) {
+                sleepms(1);
+            }
+        }
+
         if (raop_rtp_mirror->thread_exit_exception) {
             logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Exiting exception thread");
             THREAD_JOIN(raop_rtp_mirror->thread_exit_exception);
             raop_rtp_mirror->thread_exit_exception = NULL;
             logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Exception thread exit");
         }
-
+        MUTEX_DESTROY(raop_rtp_mirror->run_mutex);
+        MUTEX_DESTROY(raop_rtp_mirror->time_mutex);
+        COND_DESTROY(raop_rtp_mirror->time_cond);
+        mirror_buffer_destroy(raop_rtp_mirror->buffer);
         free(raop_rtp_mirror);
     }
 }

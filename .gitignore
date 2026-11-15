@@ -1,6 +1,8 @@
 # Visual Studio / C++ .gitignore
 
 # Build results
+AirPlayServer/lib
+/AirPlayServer-Desktop-Win-x64.zip
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
@@ -139,4 +141,6 @@ out/
 
 # Last build state
 *.lastbuildstate
-AirPlayServer/imgui.ini
+
+# Inno Setup output when compiled locally without /O
+installer/Output/

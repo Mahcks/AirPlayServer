@@ -508,7 +508,10 @@ raop_rtp_thread_udp(void *arg)
             int type_d = packet[1] & ~0x80;
             //logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp_thread_udp type_d 0x%02x, packetlen = %d", type_d, packetlen);
 
-            if (packetlen >= 12) {
+            /* A 12-byte packet contains only the RTP header. Senders use it
+             * as a no-data marker while changing routes; decoding it can
+             * feed an empty access unit into FDK-AAC. */
+            if (packetlen > 12) {
                 int no_resend = 1;  // ULTRA-LOW LATENCY: Force immediate playback, bypass buffering wait (was: raop_rtp->control_rport == 0)
                 int buf_ret;
                 const void *audiobuf;
@@ -708,6 +711,11 @@ raop_rtp_flush(raop_rtp_t *raop_rtp, int next_seq)
 void
 raop_rtp_stop(raop_rtp_t *raop_rtp)
 {
+    /* Stream-specific TEARDOWN requests can be repeated or arrive on a
+     * control connection that does not own an audio stream. */
+    if (!raop_rtp) {
+        return;
+    }
     assert(raop_rtp);
 
     /* Check that we are running and thread is not
@@ -729,9 +737,18 @@ raop_rtp_stop(raop_rtp_t *raop_rtp)
 
     THREAD_JOIN(raop_rtp->thread_time);
     
-    if (raop_rtp->csock != -1) closesocket(raop_rtp->csock);
-    if (raop_rtp->tsock != -1) closesocket(raop_rtp->tsock);
-    if (raop_rtp->dsock != -1) closesocket(raop_rtp->dsock);
+    if (raop_rtp->csock != -1) {
+        closesocket(raop_rtp->csock);
+        raop_rtp->csock = -1;
+    }
+    if (raop_rtp->tsock != -1) {
+        closesocket(raop_rtp->tsock);
+        raop_rtp->tsock = -1;
+    }
+    if (raop_rtp->dsock != -1) {
+        closesocket(raop_rtp->dsock);
+        raop_rtp->dsock = -1;
+    }
 
     /* Flush buffer into initial state */
     raop_buffer_flush(raop_rtp->buffer, -1);

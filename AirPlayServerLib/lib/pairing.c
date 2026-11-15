@@ -139,10 +139,12 @@ int
 pairing_session_check_handshake_status(pairing_session_t *session)
 {
     assert(session);
-    if (session->status != STATUS_SETUP) {
-        return -1;
-    }
-    return 0;
+	/* Pair-verify has two requests. The first advances the session from SETUP
+	 * to HANDSHAKE; the second must be allowed through to finish verification. */
+	if (session->status != STATUS_SETUP && session->status != STATUS_HANDSHAKE) {
+		return -1;
+	}
+	return 0;
 }
 
 int
@@ -253,6 +255,25 @@ pairing_session_finish(pairing_session_t *session, const unsigned char signature
 	}
 
 	session->status = STATUS_FINISHED;
+	return 0;
+}
+
+int
+pairing_session_is_finished(pairing_session_t *session)
+{
+	assert(session);
+	return session->status == STATUS_FINISHED;
+}
+
+int
+pairing_session_get_remote_public_key(pairing_session_t *session,
+	unsigned char public_key[32])
+{
+	assert(session);
+	if (public_key == NULL || session->status != STATUS_FINISHED) {
+		return -1;
+	}
+	memcpy(public_key, session->ed_theirs, 32);
 	return 0;
 }
 

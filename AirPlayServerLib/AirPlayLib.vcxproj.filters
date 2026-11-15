@@ -129,6 +129,9 @@
     <ClInclude Include="lib\pairing.h">
       <Filter>airplay</Filter>
     </ClInclude>
+	<ClInclude Include="lib\pinpair.h">
+	  <Filter>airplay</Filter>
+	</ClInclude>
     <ClInclude Include="lib\plist.h">
       <Filter>airplay</Filter>
     </ClInclude>
@@ -290,6 +293,9 @@
     <ClCompile Include="lib\pairing.c">
       <Filter>airplay</Filter>
     </ClCompile>
+	<ClCompile Include="lib\pinpair.c">
+	  <Filter>airplay</Filter>
+	</ClCompile>
     <ClCompile Include="lib\plist.c">
       <Filter>airplay</Filter>
     </ClCompile>
