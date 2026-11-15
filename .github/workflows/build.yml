@@ -38,6 +38,9 @@ jobs:
       - name: Build solution (Release|x64)
         run: msbuild AirPlay.sln /p:Configuration=Release /p:Platform=x64 /m
 
+      - name: Verify startup with occupied AirPlay ports
+        run: python tests/test_listening_ports.py AirPlayServer/bin/x64/MirrorSimAdapter.exe
+
       - name: Verify open-source codec boundary
         shell: pwsh
         run: |

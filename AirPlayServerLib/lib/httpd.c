@@ -380,8 +380,22 @@ httpd_start(httpd_t *httpd, unsigned short *port)
 	}
 
 	httpd->server_fd4 = netutils_init_socket(port, 0, 0);
+#ifdef _WIN32
+	if (httpd->server_fd4 == -1 && *port != 0) {
+		int socket_error = SOCKET_GET_ERROR();
+		const char *dynamic_ports = getenv("MIRRORSIM_DYNAMIC_PORTS");
+		if (dynamic_ports && strcmp(dynamic_ports, "1") == 0 &&
+			(socket_error == WSAEACCES || socket_error == WSAEADDRINUSE)) {
+			logger_log(httpd->logger, LOGGER_WARNING,
+				"TCP port %u unavailable (socket %d); requesting a free port",
+				(unsigned int)*port, socket_error);
+			*port = 0;
+			httpd->server_fd4 = netutils_init_socket(port, 0, 0);
+		}
+	}
+#endif
 	if (httpd->server_fd4 == -1) {
-		logger_log(httpd->logger, LOGGER_ERR, "Error initialising socket %d", SOCKET_GET_ERROR());
+		logger_log(httpd->logger, LOGGER_ERR, "Error initialising TCP port %u: socket %d", (unsigned int)*port, SOCKET_GET_ERROR());
 		MUTEX_UNLOCK(httpd->run_mutex);
 		return -1;
 	}

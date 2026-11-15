@@ -224,6 +224,8 @@ int FgAirplayServer::start(const char serverName[AIRPLAY_NAME_LEN],
 			break;
 		}
 		raop_set_port(m_pRaop, raop_port);
+		m_raopPort = raop_port;
+		m_airplayPort = airplay_port;
 		ret = 0;
 
 		if (!externalDiscovery)

@@ -20,6 +20,12 @@
 
 namespace {
 
+bool dynamicPortsEnabled()
+{
+	char value[2] = {};
+	return GetEnvironmentVariableA("MIRRORSIM_DYNAMIC_PORTS", value, sizeof(value)) == 1 && value[0] == '1';
+}
+
 constexpr unsigned int kDefaultFrameDurationUs = 16667;
 constexpr unsigned int kMinFrameDurationUs = 8000;
 constexpr unsigned int kMaxFrameDurationUs = 50000;
@@ -455,7 +461,20 @@ public:
 
 	void emitReceiverReady()
 	{
-		emitJson("{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.8.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"sender-volume\",\"video-geometry\",\"video-sender-state\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\",\"external-dnssd\"]}");
+		std::string event = "{\"name\":\"receiver_ready\",\"receiver_id\":\"airplayserver-mirrorsim-adapter\",\"protocol_version\":\"0.8.0\",\"capabilities\":[\"stdio-jsonl\",\"session-control\",\"h264-access-units\",\"pcm-audio\",\"sender-volume\",\"video-geometry\",\"video-sender-state\",\"device-identity\",\"authenticated-device-identity\",\"pairing-status\",\"pairing-trust-control\",\"pairing-challenge\",\"sender-reconnect\",\"external-dnssd\"";
+		if (dynamicPortsEnabled()) event += ",\"dynamic-listening-ports\"";
+		emitJson(event + "]}");
+	}
+
+	void emitReceiverListening(const std::string& sessionId, void* handle)
+	{
+		if (!dynamicPortsEnabled()) return;
+		unsigned short raopPort = 0, airplayPort = 0;
+		if (!fgServerGetPorts(handle, &raopPort, &airplayPort)) return;
+		std::ostringstream event;
+		event << "{\"name\":\"receiver_listening\",\"session_id\":\"" << jsonEscape(sessionId)
+			<< "\",\"raop_port\":" << raopPort << ",\"airplay_port\":" << airplayPort << "}";
+		emitJson(event.str());
 	}
 
 	void emitReceiverError(const std::string& code, const std::string& message, bool recoverable)
@@ -1632,9 +1651,10 @@ int main()
 				callback.setServerHandle(serverHandle);
 				if (!serverHandle)
 				{
-					callback.emitReceiverError("start_failed", "fgServerStart returned null", false);
+					callback.emitReceiverError("start_failed", "Could not open the AirPlay listening sockets. Check the receiver log for the TCP port and Windows socket error. Close conflicting receivers and check Windows port reservations or security software; a free-port fallback is attempted when enabled.", false);
 				}
 			}
+			if (serverHandle) callback.emitReceiverListening(sessionId, serverHandle);
 			break;
 		}
 		case SidecarCommandType::StopSession:

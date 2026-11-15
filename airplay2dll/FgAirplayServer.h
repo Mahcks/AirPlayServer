@@ -21,9 +21,13 @@ public:
 		unsigned int raopPort, unsigned int airplayPort,
 		IAirServerCallback* callback, bool compressedOnly = false);
 	void stop();
+	unsigned short raopPort() const { return m_raopPort; }
+	unsigned short airplayPort() const { return m_airplayPort; }
 	float setScale(float fRatio);
 
 protected:
+	unsigned short m_raopPort = 0;
+	unsigned short m_airplayPort = 0;
 	void clearChannels();
 	FgAirplayChannel* getChannel(const char* remoteDeviceId);
 
